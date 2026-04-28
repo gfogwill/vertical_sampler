@@ -6,7 +6,7 @@
 
 **Cause:** `SDCard(...)` is not being called during the boot sequence — either `main()` is not running, or an exception is thrown before the SD mount.
 
-**Fix:** Ensure `main.py` calls `SDCard(spi, fname="log.txt")` early inside `main()`, before creating the logger. Verify by checking:
+**Fix:** Ensure `main.py` calls `SDCard(spi, fname="log.txt")` at the start of `main()`, before creating the logger. Verify:
 ```python
 import os
 print(os.listdir("/"))   # should include 'sd'
@@ -26,7 +26,6 @@ print(os.listdir("/sd")) # should include 'log.txt'
 import supervisor
 supervisor.runtime.autoreload = False
 ```
-This must be the first two lines of the file. If placed after other imports, it may not take effect before a reload is triggered.
 
 ---
 
@@ -34,7 +33,7 @@ This must be the first two lines of the file. If placed after other imports, it 
 
 **Symptom:** `LoRa(...)` raises an exception, or the payload hangs on LoRa init.
 
-**Cause:** LoRa and the SD card share the same SPI bus (GP2/GP3/GP4). If the SD card is not properly initialized first, SPI bus contention can prevent LoRa from initializing.
+**Cause:** LoRa and the SD card share the same SPI bus (GP2/GP3/GP4). SPI bus contention can occur if initialization order is wrong.
 
 **Fix:** Always initialize `SDCard` before `LoRa` in `main()`.
 
@@ -42,22 +41,20 @@ This must be the first two lines of the file. If placed after other imports, it 
 
 ## GPS not acquiring fix
 
-**Symptom:** Logger shows `Waiting for GPS fix...` repeatedly, eventually `GPS fix not acquired`.
-
-**Cause:** Cold start, obstructed sky view, or insufficient timeout.
+**Symptom:** Logger shows `Waiting for GPS fix...` repeatedly.
 
 **Fix:**
-- Allow more time outdoors with clear sky view (cold start can take 1–2 minutes).
-- Increase `timeout` parameter in `GPS.lat_lon_alt_time(max_attempts=5, timeout=10)`.
+- Allow more time outdoors with a clear sky view (cold start can take 1–2 minutes).
+- Increase `max_attempts` and `timeout` in `GPS.lat_lon_alt_time()`.
 - Check UART wiring (GP0/GP1) and baud rate (9600).
 
 ---
 
 ## `log.txt` grows indefinitely
 
-**Behavior (expected):** `log.txt` is opened in append mode (`"a"`) every time a line is logged. It accumulates across all boots. This is intentional for flight data recovery.
+**Behavior (expected):** `log.txt` uses append mode and accumulates across all boots. This is intentional for flight data recovery.
 
-**To clear the log:** Delete or rename `log.txt` from the SD card while the payload is off, or via REPL:
+**To clear the log:**
 ```python
 import os
 os.remove("/sd/log.txt")
@@ -65,9 +62,9 @@ os.remove("/sd/log.txt")
 
 ---
 
-## Payload boots but `/sd` does not appear in `os.listdir("/")`
+## Payload boots but `/sd` does not appear
 
-**Verify the SD card is physically inserted** and that the CS pin is GP18.
+**Verify** the SD card is physically inserted and CS pin is GP18.
 
 **Test manually in REPL:**
 ```python
@@ -84,9 +81,7 @@ If this works but boot does not, the problem is in `main.py` initialization orde
 
 ## `cli.py` can't find the serial port
 
-**Symptom:** `find_serial()` raises an error or returns None.
-
-**Fix:** Make sure the ground station Pico W is connected via USB and recognized as a serial device. On Linux, it usually appears as `/dev/ttyACM0`. You may need to add your user to the `dialout` group:
+**Fix:** Make sure the ground station Pico W is connected via USB. On Linux:
 ```bash
 sudo usermod -a -G dialout $USER
 # then log out and back in

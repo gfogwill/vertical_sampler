@@ -19,6 +19,7 @@ download-micropython-image:
 
 download-circuitpython-image:
 	mkdir -p images
+	mkdir -p images
 	curl -o images/$(CIRCUIT_FNAME) $(CIRCUIT_URL)
 
 download-nuke:
@@ -27,27 +28,32 @@ download-nuke:
 
 # --- Deploy targets ---
 
+## Deploy ground station firmware
 update-ground: update-common
 	cp ground/main.py $(CIRCUITPY_PATH)/main.py
 
+## Deploy kenttarova payload
 update-kenttarova: update-payload
-	cp payload/main.py $(CIRCUITPY_PATH)/main.py
+	cp payloads/kenttarova/main.py $(CIRCUITPY_PATH)/main.py
 
+## Deploy matorova payload
 update-matorova: update-payload
-	@echo "Copy payload/main.py and update PAYLOAD_ID=matorova manually, or add matorova/main.py"
+	cp payloads/matorova/main.py $(CIRCUITPY_PATH)/main.py
 
+## Copy common payload modules (shared between all payloads)
 update-payload: update-common
-	cp payload/payload.py $(CIRCUITPY_PATH)/payload.py
-	cp payload/pressure_sensor.py $(CIRCUITPY_PATH)/pressure_sensor.py
+	cp common/payload.py          $(CIRCUITPY_PATH)/payload.py
+	cp common/pressure_sensor.py  $(CIRCUITPY_PATH)/pressure_sensor.py
 
+## Copy modules shared between payload and ground
 update-common:
 	rm -f $(CIRCUITPY_PATH)/code.py
-	cp payload/sdcard.py $(CIRCUITPY_PATH)/sdcard.py
-	cp payload/logging.py $(CIRCUITPY_PATH)/logging.py
-	cp payload/lora.py $(CIRCUITPY_PATH)/lora.py
-	cp payload/address.py $(CIRCUITPY_PATH)/address.py
-	cp payload/led.py $(CIRCUITPY_PATH)/led.py
-	cp payload/pack.py $(CIRCUITPY_PATH)/pack.py
+	cp common/sdcard.py    $(CIRCUITPY_PATH)/sdcard.py
+	cp common/logging.py   $(CIRCUITPY_PATH)/logging.py
+	cp common/lora.py      $(CIRCUITPY_PATH)/lora.py
+	cp common/address.py   $(CIRCUITPY_PATH)/address.py
+	cp common/led.py       $(CIRCUITPY_PATH)/led.py
+	cp common/pack.py      $(CIRCUITPY_PATH)/pack.py
 
 # --- Utilities ---
 
