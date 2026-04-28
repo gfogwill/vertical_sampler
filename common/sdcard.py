@@ -19,6 +19,7 @@ class SDCard:
 
     def write_dict(self, d: dict, fname):
         print(d)
+        import json
         json_str = json.dumps(d)
         with open("/sd/{}".format(fname), "a") as f:
             f.write(json_str + "\n")

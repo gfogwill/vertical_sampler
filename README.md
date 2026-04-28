@@ -6,7 +6,7 @@ Firmware and ground station software for a balloon-borne vertical air sampler. T
 
 ```
 ┌─────────────────────────┐        LoRa 868 MHz        ┌─────────────────────────┐
-│        PAYLOAD          │◄──────────────────────────►│    GROUND STATION       │
+│        PAYLOAD          │◄───────────────────────────►│    GROUND STATION       │
 │  Raspberry Pi Pico W    │                             │  Raspberry Pi Pico W    │
 │                         │                             │                         │
 │  - GPS                  │                             │  - Receives telemetry   │
@@ -26,22 +26,22 @@ Firmware and ground station software for a balloon-borne vertical air sampler. T
 
 ```
 vertical_sampler/
-├── common/                   # CircuitPython modules shared by all payloads
+├── common/                   # Shared CircuitPython code (deployed to all payloads)
 │   ├── address.py            # LoRa node addresses
 │   ├── led.py                # LED blink helpers
-│   ├── logging.py            # Logger (writes to SD card)
+│   ├── logging.py            # Logger class (writes to SD card)
 │   ├── lora.py               # LoRa wrapper (adafruit_rfm9x)
-│   ├── pack.py               # Binary struct packing for LoRa telemetry
-│   ├── payload.py            # Main loop, sensor classes, actuator classes
-│   ├── pressure_sensor.py    # LPS25H driver (I2C)
-│   └── sdcard.py             # SD card mount + file write
+│   ├── pack.py               # Binary packing for LoRa telemetry
+│   ├── payload.py            # Main loop, sensors, actuators
+│   ├── pressure_sensor.py    # LPS25H I2C driver
+│   └── sdcard.py             # SD card mount + append logging
 ├── payloads/
 │   ├── kenttarova/
-│   │   └── main.py           # Entry point for kenttarova payload
+│   │   └── main.py           # Entry point for kenttarova unit
 │   └── matorova/
-│       └── main.py           # Entry point for matorova payload
+│       └── main.py           # Entry point for matorova unit
 ├── ground/
-│   └── main.py               # Ground station firmware (LoRa ↔ USB relay)
+│   └── main.py               # Ground station firmware
 ├── cli.py                    # Python 3 CLI for sending commands from PC
 ├── Makefile                  # Deploy helpers
 └── docs/
@@ -50,13 +50,12 @@ vertical_sampler/
 
 ## Payloads
 
-Each payload has its own `main.py` with a unique `PAYLOAD_ID` and LoRa address. All other code is shared from `common/`.
+There are two payload units. Each has its own `main.py` with a unique `PAYLOAD_ID` and LoRa address. All other code (`common/`) is shared.
 
-| Payload ID   | LoRa address (`address.py`) |
-|--------------|-----------------------------|
-| `kenttarova` | `0x02`                      |
-| `matorova`   | `0x03`                      |
-| ground       | `0x01`                      |
+| Payload ID   | LoRa node address            |
+|--------------|------------------------------|
+| `kenttarova` | `kenttarova_rfm_address` (0x02) |
+| `matorova`   | `matorova_rfm_address` (0x03)   |
 
 ## Quick Start
 
@@ -64,28 +63,27 @@ Each payload has its own `main.py` with a unique `PAYLOAD_ID` and LoRa address. 
 
 ```bash
 make download-circuitpython-image
-# Copy the .uf2 to the Pico W while in BOOTSEL mode
+# Then copy the .uf2 to the Pico W while in BOOTSEL mode
 ```
 
-### 2. Install CircuitPython dependencies
+### 2. Install dependencies
 
 ```bash
 make install-lora-deps
-# Packages needed (via Thonny or circup):
+# Packages needed (install via Thonny or circup):
 #   adafruit-circuitpython-rfm9x
 #   adafruit-circuitpython-gps
 #   adafruit-circuitpython-ntp
 ```
 
-### 3. Deploy payload firmware
+### 3. Deploy a payload
 
 ```bash
-make update-kenttarova   # or: make update-matorova
+make update-kenttarova   # deploys common/ + payloads/kenttarova/main.py
+make update-matorova    # deploys common/ + payloads/matorova/main.py
 ```
 
-This copies all files from `common/` + `payloads/kenttarova/main.py` to `CIRCUITPY`.
-
-### 4. Deploy ground station firmware
+### 4. Deploy ground station
 
 ```bash
 make update-ground
@@ -94,16 +92,11 @@ make update-ground
 ### 5. Send commands from PC
 
 ```bash
-# Control pumps
 python cli.py kenttarova pump front on
 python cli.py kenttarova pump back off
-python cli.py kenttarova pump both on
-
-# Control electrovalve
 python cli.py kenttarova valve on
-
-# Request telemetry data
 python cli.py kenttarova data
+python cli.py matorova pump front on
 ```
 
 ## Data Format
@@ -132,15 +125,15 @@ Packets are transmitted as binary structs (see `common/pack.py`) over LoRa, and 
 ## SD Card Logging
 
 - Logs are written to `/sd/log.txt` in **append mode** — the file grows across boots.
-- Each line format: `YYYY-MM-DD HH:MM:SS - LEVEL - module - message`
+- Each line: `YYYY-MM-DD HH:MM:SS - LEVEL - module - message`
 - The SD card uses SPI (GP2/GP3/GP4) with CS on GP18.
-- To verify the SD is mounted after boot, open a REPL and run:
+- To verify SD is mounted after boot, open a REPL and run:
   ```python
   import os
   print(os.listdir("/sd"))
   ```
 
-## Pin Map (Payload Pico W)
+## Pin Map (Payload)
 
 | Function | GPIO |
 |---|---|

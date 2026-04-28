@@ -10,17 +10,13 @@ import pack
 from lora import LoRa
 from pressure_sensor import PressureSensor
 
-# Board pin definitions
 BOARD_GP_RH_SDA = board.GP8
 BOARD_GP_RH_SCL = board.GP9
-
 BOARD_GP_GPS_UART_TX = board.GP0
 BOARD_GP_GPS_UART_RX = board.GP1
-
 BOARD_GP_ELECTROVALVE = board.GP19
 BOARD_GP_PUMP_FRONT = board.GP20
 BOARD_GP_PUMP_BACK = board.GP21
-
 BOARD_GP_BATTERY_MONITOR = board.GP26
 BOARD_GP_FLOWMETER = board.GP28
 

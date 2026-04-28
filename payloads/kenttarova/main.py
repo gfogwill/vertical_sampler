@@ -12,17 +12,17 @@ import busio
 PAYLOAD_ID = "kenttarova"
 
 BOARD_GP_LORA_SCK = board.GP2
-BOARD_GP_LORA_TX  = board.GP3
-BOARD_GP_LORA_RX  = board.GP4
+BOARD_GP_LORA_TX = board.GP3
+BOARD_GP_LORA_RX = board.GP4
 
 spi = busio.SPI(BOARD_GP_LORA_SCK, MOSI=BOARD_GP_LORA_TX, MISO=BOARD_GP_LORA_RX)
 
 
 def main():
     sd_card = SDCard(spi, fname="log.txt")
-    logger = logging.getLogger("payload-main", sd_card)
+    logger = logging.getLogger("kenttarova-main", sd_card)
 
-    logger.info("Starting main function")
+    logger.info("Starting kenttarova payload")
 
     try:
         lora = LoRa(
@@ -42,7 +42,7 @@ def main():
             logger=logger
         )
     except Exception as e:
-        logger.error("An error occurred in the main function: {}".format(e))
+        logger.error("An error occurred: {}".format(e))
 
 
 if __name__ == "__main__":

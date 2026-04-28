@@ -1,6 +1,3 @@
-MP_URL     = https://micropython.org/resources/firmware/RPI_PICO_W-20230426-v1.20.0.uf2
-MP_FNAME   = RPI_PICO_W-20230426-v1.20.0.uf2
-
 CIRCUIT_URL   = https://downloads.circuitpython.org/bin/raspberry_pi_pico_w/en_GB/adafruit-circuitpython-raspberry_pi_pico_w-en_GB-8.2.6.uf2
 CIRCUIT_FNAME = adafruit-circuitpython-raspberry_pi_pico_w-en_GB-8.2.6.uf2
 
@@ -13,12 +10,7 @@ CIRCUITPY_PATH ?= /media/$(USER)/CIRCUITPY
 
 # --- Firmware downloads ---
 
-download-micropython-image:
-	mkdir -p images
-	curl -o images/$(MP_FNAME) $(MP_URL)
-
 download-circuitpython-image:
-	mkdir -p images
 	mkdir -p images
 	curl -o images/$(CIRCUIT_FNAME) $(CIRCUIT_URL)
 
@@ -28,32 +20,21 @@ download-nuke:
 
 # --- Deploy targets ---
 
-## Deploy ground station firmware
+update-kenttarova: update-common
+	cp payloads/kenttarova/main.py $(CIRCUITPY_PATH)/main.py
+	@echo "Deployed kenttarova to $(CIRCUITPY_PATH)"
+
+update-matorova: update-common
+	cp payloads/matorova/main.py $(CIRCUITPY_PATH)/main.py
+	@echo "Deployed matorova to $(CIRCUITPY_PATH)"
+
 update-ground: update-common
 	cp ground/main.py $(CIRCUITPY_PATH)/main.py
+	@echo "Deployed ground station to $(CIRCUITPY_PATH)"
 
-## Deploy kenttarova payload
-update-kenttarova: update-payload
-	cp payloads/kenttarova/main.py $(CIRCUITPY_PATH)/main.py
-
-## Deploy matorova payload
-update-matorova: update-payload
-	cp payloads/matorova/main.py $(CIRCUITPY_PATH)/main.py
-
-## Copy common payload modules (shared between all payloads)
-update-payload: update-common
-	cp common/payload.py          $(CIRCUITPY_PATH)/payload.py
-	cp common/pressure_sensor.py  $(CIRCUITPY_PATH)/pressure_sensor.py
-
-## Copy modules shared between payload and ground
 update-common:
 	rm -f $(CIRCUITPY_PATH)/code.py
-	cp common/sdcard.py    $(CIRCUITPY_PATH)/sdcard.py
-	cp common/logging.py   $(CIRCUITPY_PATH)/logging.py
-	cp common/lora.py      $(CIRCUITPY_PATH)/lora.py
-	cp common/address.py   $(CIRCUITPY_PATH)/address.py
-	cp common/led.py       $(CIRCUITPY_PATH)/led.py
-	cp common/pack.py      $(CIRCUITPY_PATH)/pack.py
+	cp common/*.py $(CIRCUITPY_PATH)/
 
 # --- Utilities ---
 
