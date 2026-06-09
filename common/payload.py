@@ -17,7 +17,7 @@ BOARD_GP_GPS_UART_RX = board.GP1
 BOARD_GP_ELECTROVALVE = board.GP19
 BOARD_GP_PUMP_FRONT = board.GP20
 BOARD_GP_PUMP_BACK = board.GP21
-BOARD_GP_BATTERY_MONITOR = board.GP26
+BOARD_GP_BATTERY_MONITOR = board.GP27
 BOARD_GP_FLOWMETER = board.GP28
 
 i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
@@ -169,7 +169,7 @@ def _failed_reading_data(lora, logger):
         time.sleep(2)
 
 
-def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, pump, valve, lora, start_time):
+def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time):
     elapsed_time = time.time() - start_time
     lat, lon, alt, time_ = gps.lat_lon_alt_time()
     rh_humidity, rh_temperature = rh_sensor.humidity_and_temperature()
@@ -184,7 +184,7 @@ def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, pump, valve,
         "pressure_sensor_pressure": pressure_sensor.pressure(),
         "pressure_sensor_temperature": pressure_sensor.temperature(),
         "battery_voltage": bat.voltage(),
-        "flow": 1,
+        "flow": flow_meter.flow(),
         "rssi": lora.rssi(),
         "pump_front_state": pump.get_front_state(),
         "pump_back_state": pump.get_back_state(),
@@ -216,7 +216,6 @@ def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
         else:
             logger.warning("Unexpected command: {}".format(msg_in))
             return
-        # Always respond with current packed data so CLI always gets valid JSON
         lora.send(pack.dict2bytes(data))
     except Exception as err:
         logger.error("Error processing command: {}".format(err))
@@ -231,6 +230,7 @@ def main_loop(lora, payload_id, logger):
         pump = Pump(logger)
         pressure_sensor = PressureSensor(i2c_bus)
         bat = Battery(logger)
+        flow_meter = FlowMeter(logger)
         gps = GPS(logger)
         logger.info("Sensors initialized successfully")
     except Exception as err:
@@ -243,10 +243,9 @@ def main_loop(lora, payload_id, logger):
     while True:
         led.blink(1)
 
-        # --- Collect sensor data ---
         try:
             data = _collect_data(
-                payload_id, gps, rh_sensor, pressure_sensor, bat, pump, valve, lora, start_time
+                payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time
             )
             led.blink(2)
             logger.data(str(data))
@@ -256,18 +255,15 @@ def main_loop(lora, payload_id, logger):
             _failed_reading_data(lora, logger)
             continue
 
-        # --- Listen for commands (drain all pending, respond to each) ---
         led.blink(3)
-        deadline = time.time() + 12  # listen for up to 12s
+        deadline = time.time() + 12
         got_cmd = False
         while time.time() < deadline:
             msg = lora.receive(timeout=1)
             if msg is not None:
                 _handle_command(msg, data, pump, valve, lora, payload_id, logger)
                 got_cmd = True
-                # After handling, keep draining for a bit in case of retries
                 deadline = time.time() + 3
             elif got_cmd:
-                # No more messages after handling one — move on
                 break
         time.sleep(0.2)
