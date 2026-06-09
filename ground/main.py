@@ -2,9 +2,10 @@ import supervisor
 supervisor.runtime.autoreload = False
 
 import json
+import select
+import sys
 import busio
 import board
-import usb_cdc
 import led
 import pack
 import address
@@ -22,7 +23,8 @@ lora = LoRa(
     destination=None,
 )
 
-serial = usb_cdc.data
+POLL = select.poll()
+POLL.register(sys.stdin, 1)
 
 
 class UnexpectedCommand(Exception):
@@ -54,25 +56,21 @@ def _process_command(cmd_str):
         led.blink(ntimes=6, bsleep=0.4, tsleep=0.2, esleep=0.4)
         try:
             d = pack.bytes2dict(msg)
-            serial.write((json.dumps(d) + "\n").encode())
+            print(json.dumps(d))
         except Exception:
-            text = msg.decode(errors="ignore").strip()
-            serial.write(('{ "msg": "' + text + '"}\n').encode())
+            print(msg.decode(errors="ignore").strip())
     elif msg is None:
-        serial.write(b'{"error": "no response"}\n')
+        print('{"error": "no response"}')
 
 
 while True:
     led.blink(ntimes=3, bsleep=0.1, tsleep=0.1, esleep=0.1)
-
-    if serial.in_waiting > 0:
-        line = serial.readline()
-        if line:
-            cmd_str = line.decode(errors="ignore").strip().lower()
-            try:
-                _process_command(cmd_str)
-            except UnexpectedCommand as e:
-                serial.write(('{ "error": "unexpected command: ' + str(e) + '"}\n').encode())
-            except Exception as e:
-                err = str(e).replace('"', "'").replace("\n", " ")
-                serial.write(('{ "error": "' + err + '"}\n').encode())
+    if POLL.poll(0):
+        cmd_str = sys.stdin.readline().strip().lower()
+        try:
+            _process_command(cmd_str)
+        except UnexpectedCommand as e:
+            print('{"error": "unexpected command: ' + str(e) + '"}')
+        except Exception as e:
+            err = str(e).replace('"', "'").replace("\n", " ")
+            print('{"error": "' + err + '"}')
