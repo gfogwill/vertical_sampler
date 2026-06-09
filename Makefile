@@ -30,6 +30,7 @@ update-matorova: update-common
 
 update-ground: update-common
 	cp ground/main.py $(CIRCUITPY_PATH)/main.py
+	cp ground/boot.py $(CIRCUITPY_PATH)/boot.py
 	@echo "Deployed ground station to $(CIRCUITPY_PATH)"
 
 update-common:
