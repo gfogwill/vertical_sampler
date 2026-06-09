@@ -86,3 +86,40 @@ If this works but boot does not, the problem is in `main.py` initialization orde
 sudo usermod -a -G dialout $USER
 # then log out and back in
 ```
+
+---
+
+## `cp: error writing ... No space left on device` after flashing UF2
+
+**Symptom:** `make update-*` fails with:
+```
+cp: error writing '/media/.../CIRCUITPY/adafruit_gps.py': No space left on device
+```
+This happens even immediately after flashing a fresh UF2.
+
+**Cause:** CircuitPython's `CIRCUITPY` drive has a fixed filesystem size baked into the UF2. By default it is **~1 MB**, which fills up quickly with libraries. Flashing the UF2 again does **not** wipe or resize the filesystem — it only replaces the firmware, leaving the old filesystem intact.
+
+**Fix — wipe and resize the filesystem:**
+
+1. **Enter bootloader mode:** hold BOOTSEL while plugging in USB (or double-tap RESET). The drive `RPI-RP2` appears.
+
+2. **Flash the CircuitPython UF2** (if not already done): drag the `.uf2` onto `RPI-RP2`.
+
+3. **Wipe the filesystem from the REPL.** Connect via serial (Thonny or `screen /dev/ttyACM0 115200`) and run:
+   ```python
+   import storage
+   storage.erase_filesystem()
+   ```
+   The board will reboot and format a **fresh, empty** `CIRCUITPY` filesystem.
+
+4. **Run `make update-*` again.** The drive is now empty and should have enough space.
+
+**Prevention:** If the drive keeps filling up, remove unused `.py` or `.mpy` files. Pre-compiled `.mpy` files (from the Adafruit CircuitPython Bundle) are significantly smaller than `.py` sources — use them for large libraries like `adafruit_gps`.
+
+**Check available space from REPL:**
+```python
+import os
+s = os.statvfs("/")
+free_kb = s[0] * s[3] / 1024
+print("Free:", free_kb, "KB")
+```
