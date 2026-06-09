@@ -1,5 +1,6 @@
 import argparse
 import json
+import time
 from enum import Enum
 import datetime
 
@@ -26,22 +27,28 @@ FILL_INT   = -999999
 FILL_UINT  = 4294967295
 FILL_FLOAT = -1e9
 
+# Max time a payload cycle takes (GPS read + sensors + listen window).
+# If no response arrives within this time, we retry.
+PAYLOAD_CYCLE_S  = 35   # seconds — slightly above worst-case cycle
+RETRY_INTERVAL_S = 5    # how long to wait between retries
+MAX_RETRIES      = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
+
 FIELDS = [
     # (key, label, unit, group)
-    ("gps_latitude",              "Latitude",          "°",     "GPS"),
-    ("gps_longitude",             "Longitude",         "°",     "GPS"),
-    ("gps_altitude",              "Altitude",          "m",     "GPS"),
-    ("gps_time",                  "Time (GPS)",        "UTC",   "GPS"),
-    ("rh_sensor_humidity",        "Humidity",          "%RH",   "Atmosphere"),
-    ("rh_sensor_temperature",     "Temperature (RH)",  "°C",    "Atmosphere"),
-    ("pressure_sensor_pressure",  "Pressure",          "hPa",   "Atmosphere"),
-    ("pressure_sensor_temperature","Temperature (P)",  "°C",    "Atmosphere"),
-    ("flow",                      "Flow",              "L/min", "Sampler"),
-    ("pump_front_state",          "Pump front",        "",      "Sampler"),
-    ("pump_back_state",           "Pump back",         "",      "Sampler"),
-    ("valve_state",               "Valve",             "",      "Sampler"),
-    ("battery_voltage",           "Battery",           "V",     "System"),
-    ("rssi",                      "RSSI",              "dBm",   "System"),
+    ("gps_latitude",               "Latitude",           "°",     "GPS"),
+    ("gps_longitude",              "Longitude",          "°",     "GPS"),
+    ("gps_altitude",               "Altitude",           "m",     "GPS"),
+    ("gps_time",                   "Time (GPS)",         "UTC",   "GPS"),
+    ("rh_sensor_humidity",         "Humidity",           "%RH",   "Atmosphere"),
+    ("rh_sensor_temperature",      "Temperature (RH)",   "°C",    "Atmosphere"),
+    ("pressure_sensor_pressure",   "Pressure",           "hPa",   "Atmosphere"),
+    ("pressure_sensor_temperature", "Temperature (P)",   "°C",    "Atmosphere"),
+    ("flow",                       "Flow",               "L/min", "Sampler"),
+    ("pump_front_state",           "Pump front",         "",      "Sampler"),
+    ("pump_back_state",            "Pump back",          "",      "Sampler"),
+    ("valve_state",                "Valve",              "",      "Sampler"),
+    ("battery_voltage",            "Battery",            "V",     "System"),
+    ("rssi",                       "RSSI",               "dBm",   "System"),
 ]
 
 GROUP_ORDER = ["GPS", "Atmosphere", "Sampler", "System"]
@@ -79,15 +86,10 @@ def pretty_print(data, payload_id=""):
     COL_LABEL = 26
     COL_VALUE = 10
     COL_UNIT  = 7
-    W = COL_LABEL + COL_VALUE + COL_UNIT + 6  # total inner width
+    W = COL_LABEL + COL_VALUE + COL_UNIT + 6
 
-    # Header
     title = "  {}  ".format(payload_id.upper() if payload_id else "TELEMETRY")
-    print("\n\u2554" + "═" * W + "╗")
-    print("║" + title.center(W) + "║")
-    print("╚" + "═" * W + "╝")  # will be replaced below
 
-    # Rebuild with proper separators
     lines = []
     lines.append("╔" + "═" * W + "╗")
     lines.append("║" + title.center(W) + "║")
@@ -98,7 +100,6 @@ def pretty_print(data, payload_id=""):
         grouped[group].append((key, label, unit))
 
     for g_idx, group in enumerate(GROUP_ORDER):
-        # Group header
         group_title = "  " + group
         lines.append("║ " + group_title.ljust(COL_LABEL) + " ║ " + " " * COL_VALUE + " ║ " + " " * COL_UNIT + " ║")
 
@@ -115,15 +116,10 @@ def pretty_print(data, payload_id=""):
                 " ║ " + unit.ljust(COL_UNIT) + " ║"
             )
 
-        # Separator between groups
         if g_idx < len(GROUP_ORDER) - 1:
             lines.append("╠" + "═" * (COL_LABEL + 2) + "╬" + "═" * (COL_VALUE + 2) + "╬" + "═" * (COL_UNIT + 2) + "╣")
 
     lines.append("╚" + "═" * (COL_LABEL + 2) + "╩" + "═" * (COL_VALUE + 2) + "╩" + "═" * (COL_UNIT + 2) + "╝")
-
-    # Reprint cleanly
-    import sys
-    sys.stdout.write("\033[5A\033[J")  # erase the preliminary header
     print("\n" + "\n".join(lines) + "\n")
 
 
@@ -139,28 +135,54 @@ def find_serial(baudrate=9600, timeout=2):
     raise RuntimeError("No serial port found. Is the ground station Pico connected?")
 
 
-def relay_cmd(args):
+def _build_cmd(args):
     if args.subcommand == "pump":
-        cmd = "{} {} {} {}\n".format(args.payload, args.subcommand, args.pump_location, args.state).encode()
+        return "{} {} {} {}\n".format(args.payload, args.subcommand, args.pump_location, args.state).encode()
     elif args.subcommand == "valve":
-        cmd = "{} {} {}\n".format(args.payload, args.subcommand, args.state).encode()
+        return "{} {} {}\n".format(args.payload, args.subcommand, args.state).encode()
     elif args.subcommand == "data":
-        cmd = "{} {}\n".format(args.payload, args.subcommand).encode()
+        return "{} {}\n".format(args.payload, args.subcommand).encode()
     else:
         raise ValueError("Unknown subcommand: {}".format(args.subcommand))
 
+
+def relay_cmd(args):
+    cmd = _build_cmd(args)
+
     with find_serial() as ser:
-        ser.write(cmd)
-        ser.flush()
-        line = ser.readline()
-        try:
-            data = json.loads(line.decode())
-            if args.subcommand == "data":
-                pretty_print(data, payload_id=str(args.payload))
-            else:
-                print(json.dumps(data, indent=2))
-        except json.JSONDecodeError:
-            print(line.decode().strip())
+        for attempt in range(1, MAX_RETRIES + 1):
+            print("Sending command (attempt {}/{})...".format(attempt, MAX_RETRIES), end="", flush=True)
+            ser.reset_input_buffer()
+            ser.write(cmd)
+            ser.flush()
+
+            # Wait up to RETRY_INTERVAL_S for a response
+            deadline = time.time() + RETRY_INTERVAL_S
+            line = b""
+            while time.time() < deadline:
+                if ser.in_waiting:
+                    line = ser.readline()
+                    if line.strip():
+                        break
+                time.sleep(0.1)
+
+            if line.strip():
+                print(" OK")
+                try:
+                    data = json.loads(line.decode())
+                    if args.subcommand == "data":
+                        pretty_print(data, payload_id=str(args.payload))
+                    else:
+                        print(json.dumps(data, indent=2))
+                except json.JSONDecodeError:
+                    print(line.decode().strip())
+                return
+
+            print(" no response, retrying in {}s...".format(RETRY_INTERVAL_S))
+
+        print("ERROR: no response from {} after {} attempts (~{}s).".format(
+            args.payload, MAX_RETRIES, MAX_RETRIES * RETRY_INTERVAL_S
+        ))
 
 
 def parse_args():
