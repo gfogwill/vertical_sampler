@@ -8,6 +8,7 @@ import usb_cdc
 from lora import LoRa
 import address
 import pack
+import json
 
 BOARD_GP_LORA_SCK = board.GP2
 BOARD_GP_LORA_TX  = board.GP3
@@ -23,20 +24,26 @@ lora = LoRa(
 
 serial = usb_cdc.data
 
+# Disable CircuitPython stdout on the data CDC port to avoid
+# boot messages and echoes polluting the JSON stream.
+supervisor.runtime.usb_cdc = False  # noqa: suppress REPL on data port
+
 while True:
+    # --- Incoming LoRa packet → forward as JSON to PC ---
     msg = lora.receive(timeout=1)
     if msg is not None:
         try:
             data = pack.bytes2dict(msg)
-            import json
             serial.write((json.dumps(data) + "\n").encode())
         except Exception:
-            serial.write(msg + b"\n")
+            # Forward raw bytes as hex so the PC always gets valid text
+            serial.write('{"raw": "' + msg.hex() + '"}\n').encode())
 
+    # --- Incoming command from PC → relay via LoRa ---
     if serial.in_waiting > 0:
         line = serial.readline()
         if line:
-            cmd = line.decode().strip()
+            cmd = line.decode(errors="ignore").strip()
             parts = cmd.split()
             if len(parts) >= 2:
                 payload_id = parts[0]

@@ -146,39 +146,51 @@ def _build_cmd(args):
         raise ValueError("Unknown subcommand: {}".format(args.subcommand))
 
 
+def _read_json_line(ser, timeout_s):
+    """Read lines from ser until a valid JSON line is found or timeout expires."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if ser.in_waiting:
+            raw = ser.readline()
+            text = raw.decode(errors="ignore").strip()
+            if not text:
+                continue
+            if text.startswith("{") or text.startswith("["):
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+            # Non-JSON line — log for debug visibility but keep waiting
+            # print("[skip] ", text)  # uncomment to debug
+        else:
+            time.sleep(0.05)
+    return None
+
+
 def relay_cmd(args):
     cmd = _build_cmd(args)
 
     with find_serial() as ser:
+        # Flush any boot messages or stale data before sending
+        time.sleep(0.2)
+        ser.reset_input_buffer()
+
         for attempt in range(1, MAX_RETRIES + 1):
             print("Sending command (attempt {}/{})...".format(attempt, MAX_RETRIES), end="", flush=True)
-            ser.reset_input_buffer()
             ser.write(cmd)
             ser.flush()
 
-            # Wait up to RETRY_INTERVAL_S for a response
-            deadline = time.time() + RETRY_INTERVAL_S
-            line = b""
-            while time.time() < deadline:
-                if ser.in_waiting:
-                    line = ser.readline()
-                    if line.strip():
-                        break
-                time.sleep(0.1)
+            data = _read_json_line(ser, timeout_s=RETRY_INTERVAL_S)
 
-            if line.strip():
+            if data is not None:
                 print(" OK")
-                try:
-                    data = json.loads(line.decode())
-                    if args.subcommand == "data":
-                        pretty_print(data, payload_id=str(args.payload))
-                    else:
-                        print(json.dumps(data, indent=2))
-                except json.JSONDecodeError:
-                    print(line.decode().strip())
+                if args.subcommand == "data":
+                    pretty_print(data, payload_id=str(args.payload))
+                else:
+                    print(json.dumps(data, indent=2))
                 return
 
-            print(" no response, retrying in {}s...".format(RETRY_INTERVAL_S))
+            print(" no response, retrying...")
 
         print("ERROR: no response from {} after {} attempts (~{}s).".format(
             args.payload, MAX_RETRIES, MAX_RETRIES * RETRY_INTERVAL_S
