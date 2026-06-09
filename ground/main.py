@@ -1,5 +1,6 @@
 import supervisor
 supervisor.runtime.autoreload = False
+supervisor.runtime.repl_mode_enabled = False
 
 import json
 import select
@@ -67,6 +68,9 @@ while True:
     led.blink(ntimes=3, bsleep=0.1, tsleep=0.1, esleep=0.1)
     if POLL.poll(0):
         cmd_str = sys.stdin.readline().strip().lower()
+        # Ignore echo: skip lines that look like our own output
+        if not cmd_str or cmd_str.startswith("{"):
+            continue
         try:
             _process_command(cmd_str)
         except UnexpectedCommand as e:
