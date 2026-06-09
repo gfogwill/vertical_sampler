@@ -2,7 +2,6 @@ import supervisor
 supervisor.runtime.autoreload = False
 
 import json
-import time
 import busio
 import board
 import usb_cdc
@@ -43,13 +42,10 @@ def _process_command(cmd_str):
     else:
         raise UnexpectedCommand("unknown payload: " + payload_id)
 
-    # Send command to payload via LoRa
     lora.send(" ".join(cmd).encode())
 
-    # Wait synchronously for the response (same pattern as original)
     msg = None
-    max_tries = 10
-    for _ in range(max_tries):
+    for _ in range(10):
         msg = lora.receive(timeout=2)
         if msg is not None:
             break
@@ -60,11 +56,10 @@ def _process_command(cmd_str):
             d = pack.bytes2dict(msg)
             serial.write((json.dumps(d) + "\n").encode())
         except Exception:
-            # Not a packed struct — forward as plain text JSON
             text = msg.decode(errors="ignore").strip()
-            serial.write('{"msg": "' + text + '"}\n').encode())
+            serial.write(('{ "msg": "' + text + '"}\n').encode())
     elif msg is None:
-        serial.write('{"error": "no response after ' + str(max_tries) + ' attempts"}\n').encode())
+        serial.write(b'{"error": "no response"}\n')
 
 
 while True:
@@ -77,7 +72,7 @@ while True:
             try:
                 _process_command(cmd_str)
             except UnexpectedCommand as e:
-                serial.write('{"error": "unexpected command: ' + str(e) + '"}\n').encode())
+                serial.write(('{ "error": "unexpected command: ' + str(e) + '"}\n').encode())
             except Exception as e:
                 err = str(e).replace('"', "'").replace("\n", " ")
-                serial.write('{"error": "' + err + '"}\n').encode())
+                serial.write(('{ "error": "' + err + '"}\n').encode())
