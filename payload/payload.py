@@ -27,7 +27,7 @@ BOARD_GP_FLOWMETER = board.GP28
 _FLOW_DIVIDER_RATIO = 32.6 / (10.0 + 32.6)
 _FLOW_FULL_SCALE_V = 4.0
 _FLOW_FULL_SCALE_LMIN = 20.0
-_FLOW_OFFSET_LMIN = 0.0  # calibrate: set to flow() reading with pump off
+_FLOW_OFFSET_LMIN = 0.25  # calibrate: set to flow() reading with pump off
 
 i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
 
