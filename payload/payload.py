@@ -9,22 +9,25 @@ import led
 import pack
 from lora import LoRa
 from pressure_sensor import PressureSensor
-import logging
-from sdcard import SDCard
 
-# Board pin definitions
 BOARD_GP_RH_SDA = board.GP8
 BOARD_GP_RH_SCL = board.GP9
-
 BOARD_GP_GPS_UART_TX = board.GP0
 BOARD_GP_GPS_UART_RX = board.GP1
-
 BOARD_GP_ELECTROVALVE = board.GP19
 BOARD_GP_PUMP_FRONT = board.GP20
 BOARD_GP_PUMP_BACK = board.GP21
-
-BOARD_GP_BATTERY_MONITOR = board.GP26
+BOARD_GP_BATTERY_MONITOR = board.GP27
 BOARD_GP_FLOWMETER = board.GP28
+
+# Voltage divider on flowmeter analog output: 10kΩ (series) + 32.6kΩ (to GND)
+# Divider ratio: 32.6 / (10 + 32.6) = 0.7652
+# TSI 4121: 0–4V = 0–20 Std L/min
+# Offset: reading with pump off (should be 0). Measure and adjust _FLOW_OFFSET_LMIN.
+_FLOW_DIVIDER_RATIO = 32.6 / (10.0 + 32.6)
+_FLOW_FULL_SCALE_V = 4.0
+_FLOW_FULL_SCALE_LMIN = 20.0
+_FLOW_OFFSET_LMIN = 0.0  # calibrate: set to flow() reading with pump off
 
 i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
 
@@ -39,7 +42,7 @@ class Pump:
         self.pump_back.switch_to_output()
         logger.info("Pump initialized")
 
-    def set_state(self, pump_location: str, state: str):
+    def set_state(self, pump_location, state):
         state_value = state == "on"
         if pump_location == "front":
             self.pump_front.value = state_value
@@ -49,10 +52,10 @@ class Pump:
             self.pump_front.value = state_value
             self.pump_back.value = state_value
 
-    def get_front_state(self) -> int:
+    def get_front_state(self):
         return int(self.pump_front.value)
 
-    def get_back_state(self) -> int:
+    def get_back_state(self):
         return int(self.pump_back.value)
 
 
@@ -63,10 +66,10 @@ class Valve:
         self.valve.switch_to_output()
         logger.info("Valve initialized")
 
-    def set_state(self, state: str):
+    def set_state(self, state):
         self.valve.value = state == "on"
 
-    def get_state(self) -> int:
+    def get_state(self):
         return int(self.valve.value)
 
 
@@ -77,8 +80,10 @@ class FlowMeter:
         logger.info("FlowMeter initialized")
 
     def flow(self):
-        raw = self.flow_meter.value * 3.3 / 65535
-        return 5 * raw
+        # ADC reads voltage after divider; undo divider to get original signal
+        v_adc = self.flow_meter.value * 3.3 / 65535
+        v_sensor = v_adc / _FLOW_DIVIDER_RATIO
+        return max(0.0, (v_sensor / _FLOW_FULL_SCALE_V) * _FLOW_FULL_SCALE_LMIN - _FLOW_OFFSET_LMIN)
 
 
 class Sht85Sensor:
@@ -123,7 +128,7 @@ class GPS:
     def __init__(self, logger):
         self.logger = logger
         self.sensor = adafruit_gps.GPS(
-            busio.UART(BOARD_GP_GPS_UART_TX, BOARD_GP_GPS_UART_RX, baudrate=9600), debug=False
+            busio.UART(BOARD_GP_GPS_UART_TX, BOARD_GP_GPS_UART_RX, baudrate=9600)
         )
         self.sensor.send_command(b"PMTK314,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0")
         self.sensor.send_command(b"PMTK220,1000")
@@ -159,7 +164,7 @@ class GPS:
         return None, None, None, None
 
 
-def _failed_sensors_loop(lora: LoRa, logger):
+def _failed_sensors_loop(lora, logger):
     logger.error("Failed to initialize sensors, entering failed sensors loop")
     while True:
         led.blink(13, tsleep=0.2, bsleep=0.1, esleep=0.1)
@@ -167,7 +172,7 @@ def _failed_sensors_loop(lora: LoRa, logger):
         time.sleep(2)
 
 
-def _failed_reading_data(lora: LoRa, logger):
+def _failed_reading_data(lora, logger):
     logger.error("Failed to read data")
     for _ in range(10):
         led.blink(7, tsleep=0.2, bsleep=0.1, esleep=0.1)
@@ -175,7 +180,59 @@ def _failed_reading_data(lora: LoRa, logger):
         time.sleep(2)
 
 
-def main_loop(lora: LoRa, payload_id: str, logger):
+def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time):
+    elapsed_time = time.time() - start_time
+    lat, lon, alt, time_ = gps.lat_lon_alt_time()
+    rh_humidity, rh_temperature = rh_sensor.humidity_and_temperature()
+    return {
+        "payload_id": payload_id,
+        "gps_time": elapsed_time,
+        "gps_latitude": lat,
+        "gps_longitude": lon,
+        "gps_altitude": alt,
+        "rh_sensor_humidity": rh_humidity,
+        "rh_sensor_temperature": rh_temperature,
+        "pressure_sensor_pressure": pressure_sensor.pressure(),
+        "pressure_sensor_temperature": pressure_sensor.temperature(),
+        "battery_voltage": bat.voltage(),
+        "flow": flow_meter.flow(),
+        "rssi": lora.rssi(),
+        "pump_front_state": pump.get_front_state(),
+        "pump_back_state": pump.get_back_state(),
+        "valve_state": valve.get_state(),
+    }
+
+
+def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
+    try:
+        msg_in = msg.decode().strip()
+        cmd = msg_in.split()
+        if not cmd:
+            return
+        main_cmd, *sub_cmd = cmd
+        if main_cmd == "pump":
+            pump_loc, state = sub_cmd[0], sub_cmd[1]
+            pump.set_state(pump_loc, state)
+            data["pump_front_state"] = pump.get_front_state()
+            data["pump_back_state"] = pump.get_back_state()
+            logger.info("Processed pump command: {}".format(msg_in))
+        elif main_cmd == "valve":
+            state = sub_cmd[0]
+            valve.set_state(state)
+            data["valve_state"] = valve.get_state()
+            logger.info("Processed valve command: {}".format(msg_in))
+        elif main_cmd == "data":
+            logger.info("Data command received")
+        else:
+            logger.warning("Unexpected command: {}".format(msg_in))
+            return
+        lora.send(pack.dict2bytes(data))
+    except Exception as err:
+        logger.error("Error processing command: {}".format(err))
+        lora.send("error: {}\n".format(err).encode())
+
+
+def main_loop(lora, payload_id, logger):
     logger.info("Starting main loop")
     try:
         rh_sensor = Sht85Sensor(logger, i2c_bus)
@@ -183,6 +240,7 @@ def main_loop(lora: LoRa, payload_id: str, logger):
         pump = Pump(logger)
         pressure_sensor = PressureSensor(i2c_bus)
         bat = Battery(logger)
+        flow_meter = FlowMeter(logger)
         gps = GPS(logger)
         logger.info("Sensors initialized successfully")
     except Exception as err:
@@ -190,62 +248,32 @@ def main_loop(lora: LoRa, payload_id: str, logger):
         _failed_sensors_loop(lora, logger)
 
     start_time = time.time()
+    data = {}
 
     while True:
         led.blink(1)
+
         try:
-            elapsed_time = time.time() - start_time
-            lat, lon, alt, time_ = gps.lat_lon_alt_time()
-            rh_humidity, rh_temperature = rh_sensor.humidity_and_temperature()
-            data = {
-                "payload_id": payload_id,
-                "gps_time": elapsed_time,
-                "gps_latitude": lat,
-                "gps_longitude": lon,
-                "gps_altitude": alt,
-                "rh_sensor_humidity": rh_humidity,
-                "rh_sensor_temperature": rh_temperature,
-                "pressure_sensor_pressure": pressure_sensor.pressure(),
-                "pressure_sensor_temperature": pressure_sensor.temperature(),
-                "battery_voltage": bat.voltage(),
-                "flow": 1,
-                "rssi": lora.rssi(),
-                "pump_front_state": pump.get_front_state(),
-                "pump_back_state": pump.get_back_state(),
-                "valve_state": valve.get_state(),
-            }
+            data = _collect_data(
+                payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time
+            )
             led.blink(2)
             logger.data(str(data))
-            logger.info("Sensor data collected and logged")
+            logger.info("Sensor data collected")
         except Exception as err:
             logger.error("Error reading data: {}".format(err))
             _failed_reading_data(lora, logger)
             continue
 
         led.blink(3)
-        msg = lora.receive(timeout=10)
-        time.sleep(0.6)
-        if msg is not None:
-            try:
-                msg_in = msg.decode().strip()
-                cmd = msg_in.split()
-                main_cmd, *sub_cmd = cmd
-                if main_cmd == "pump":
-                    pump_loc, state, *_ = sub_cmd
-                    pump.set_state(pump_loc, state)
-                    lora.send("{} processed pump cmd\n".format(payload_id).encode())
-                    logger.info("Processed pump command: {}".format(msg_in))
-                elif main_cmd == "valve":
-                    state, *_ = sub_cmd
-                    valve.set_state(state)
-                    lora.send("{} processed valve cmd\n".format(payload_id).encode())
-                    logger.info("Processed valve command: {}".format(msg_in))
-                elif main_cmd == "data":
-                    logger.info("Data command received")
-                    lora.send(pack.dict2bytes(data))
-                else:
-                    lora.send("{} received unexpected cmd\n".format(payload_id).encode())
-                    logger.warning("Received unexpected command: {}".format(msg_in))
-            except Exception as err:
-                logger.error("Error processing command: {}".format(err))
-                lora.send("error processing cmd. {}\n".format(err).encode())
+        deadline = time.time() + 12
+        got_cmd = False
+        while time.time() < deadline:
+            msg = lora.receive(timeout=1)
+            if msg is not None:
+                _handle_command(msg, data, pump, valve, lora, payload_id, logger)
+                got_cmd = True
+                deadline = time.time() + 3
+            elif got_cmd:
+                break
+        time.sleep(0.2)
