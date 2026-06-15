@@ -20,12 +20,14 @@ BOARD_GP_PUMP_BACK = board.GP21
 BOARD_GP_BATTERY_MONITOR = board.GP27
 BOARD_GP_FLOWMETER = board.GP28
 
-# Voltage divider on flowmeter analog output: 10kΩ (series) + 33kΩ (to GND)
-# Divider ratio: 33 / (10 + 33) = 0.7674
+# Voltage divider on flowmeter analog output: 10kΩ (series) + 32.6kΩ (to GND)
+# Divider ratio: 32.6 / (10 + 32.6) = 0.7652
 # TSI 4121: 0–4V = 0–20 Std L/min
-_FLOW_DIVIDER_RATIO = 33.0 / (10.0 + 33.0)
+# Offset: reading with pump off (should be 0). Measure and adjust _FLOW_OFFSET_LMIN.
+_FLOW_DIVIDER_RATIO = 32.6 / (10.0 + 32.6)
 _FLOW_FULL_SCALE_V = 4.0
 _FLOW_FULL_SCALE_LMIN = 20.0
+_FLOW_OFFSET_LMIN = 0.0  # calibrate: set to flow() reading with pump off
 
 i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
 
@@ -81,7 +83,7 @@ class FlowMeter:
         # ADC reads voltage after divider; undo divider to get original signal
         v_adc = self.flow_meter.value * 3.3 / 65535
         v_sensor = v_adc / _FLOW_DIVIDER_RATIO
-        return (v_sensor / _FLOW_FULL_SCALE_V) * _FLOW_FULL_SCALE_LMIN
+        return max(0.0, (v_sensor / _FLOW_FULL_SCALE_V) * _FLOW_FULL_SCALE_LMIN - _FLOW_OFFSET_LMIN)
 
 
 class Sht85Sensor:
