@@ -1,6 +1,7 @@
 import json
 import time
 import rtc
+import microcontroller
 import adafruit_gps
 import analogio
 import board
@@ -24,11 +25,18 @@ BOARD_GP_FLOWMETER = board.GP28
 # Voltage divider on flowmeter analog output: 10kΩ (series) + 32.6kΩ (to GND)
 # Divider ratio: 32.6 / (10 + 32.6) = 0.7652
 # TSI 4121: 0–4V = 0–20 Std L/min
-# Offset: reading with pump off (should be 0). Measure and adjust _FLOW_OFFSET_LMIN.
 _FLOW_DIVIDER_RATIO = 32.6 / (10.0 + 32.6)
 _FLOW_FULL_SCALE_V = 4.0
 _FLOW_FULL_SCALE_LMIN = 20.0
 _FLOW_OFFSET_LMIN = 0.25  # calibrate: set to flow() reading with pump off
+
+# Battery thresholds (6S Li-ion: 4.2V*6=25.2V full, 3.3V*6=19.8V warning, 3.1V*6=18.6V cutoff)
+_BAT_WARN_V = 19.8
+_BAT_CUTOFF_V = 18.6
+
+# CPU temperature thresholds (Celsius)
+_TEMP_WARN_C = 45.0
+_TEMP_CRITICAL_C = 55.0
 
 i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
 _rtc = rtc.RTC()
@@ -69,6 +77,10 @@ class Pump:
     def get_back_state(self):
         return int(self.pump_back.value)
 
+    def emergency_off(self):
+        self.pump_front.value = False
+        self.pump_back.value = False
+
 
 class Valve:
     def __init__(self, logger):
@@ -91,7 +103,6 @@ class FlowMeter:
         logger.info("FlowMeter initialized")
 
     def flow(self):
-        # ADC reads voltage after divider; undo divider to get original signal
         v_adc = self.flow_meter.value * 3.3 / 65535
         v_sensor = v_adc / _FLOW_DIVIDER_RATIO
         return max(0.0, (v_sensor / _FLOW_FULL_SCALE_V) * _FLOW_FULL_SCALE_LMIN - _FLOW_OFFSET_LMIN)
@@ -132,7 +143,11 @@ class Battery:
         logger.info("Battery initialized")
 
     def voltage(self):
-        return 10 * self.v.value * 3.3 / 65535
+        raw = self.v.value * 3.3 / 65535
+        # TODO: replace 10 with calibrated factor once measured against multimeter
+        v = 10 * raw
+        print("[BAT CAL] raw_adc={:.5f} V  reported={:.3f} V".format(raw, v))
+        return v
 
 
 class GPS:
@@ -168,7 +183,6 @@ class GPS:
             alt = gps.altitude_m
             try:
                 if all(x is not None for x in (lat, lon, alt, time_)):
-                    # Sync RTC once from GPS
                     if not _rtc_synced:
                         try:
                             _rtc.datetime = time_
@@ -182,6 +196,17 @@ class GPS:
                 return None, None, None, None
         self.logger.error("Lost GPS fix")
         return None, None, None, None
+
+
+def _check_safety(pump, logger):
+    """Check battery voltage and CPU temperature. Cut pump if critical."""
+    cpu_temp = microcontroller.cpu.temperature
+    if cpu_temp >= _TEMP_CRITICAL_C:
+        logger.error("CPU temp critical: {:.1f}C — cutting pump".format(cpu_temp))
+        pump.emergency_off()
+    elif cpu_temp >= _TEMP_WARN_C:
+        logger.warning("CPU temp warning: {:.1f}C".format(cpu_temp))
+    return cpu_temp
 
 
 def _failed_sensors_loop(lora, logger):
@@ -204,6 +229,8 @@ def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, 
     elapsed_time = time.time() - start_time
     lat, lon, alt, time_ = gps.lat_lon_alt_time()
     rh_humidity, rh_temperature = rh_sensor.humidity_and_temperature()
+    bat_v = bat.voltage()
+    cpu_temp = microcontroller.cpu.temperature
     return {
         "payload_id": payload_id,
         "rtc_time": _format_rtc_time(),
@@ -215,7 +242,8 @@ def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, 
         "rh_sensor_temperature": rh_temperature,
         "pressure_sensor_pressure": pressure_sensor.pressure(),
         "pressure_sensor_temperature": pressure_sensor.temperature(),
-        "battery_voltage": bat.voltage(),
+        "battery_voltage": bat_v,
+        "cpu_temperature": cpu_temp,
         "flow": flow_meter.flow(),
         "rssi": lora.rssi(),
         "pump_front_state": pump.get_front_state(),
@@ -278,6 +306,17 @@ def main_loop(lora, payload_id, logger):
             data = _collect_data(
                 payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time
             )
+            # Safety checks every cycle
+            _check_safety(pump, logger)
+            bat_v = data["battery_voltage"]
+            if bat_v > 1.0:  # skip when no battery connected (reads ~0V)
+                if bat_v <= _BAT_CUTOFF_V:
+                    logger.error("Battery critical: {:.2f}V — cutting pump".format(bat_v))
+                    pump.emergency_off()
+                    data["pump_front_state"] = pump.get_front_state()
+                    data["pump_back_state"] = pump.get_back_state()
+                elif bat_v <= _BAT_WARN_V:
+                    logger.warning("Battery low: {:.2f}V".format(bat_v))
             led.blink(2)
             logger.data(data)
             logger.info("Sensor data collected")
