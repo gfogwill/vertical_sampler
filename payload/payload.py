@@ -2,6 +2,7 @@ import json
 import time
 import rtc
 import microcontroller
+import watchdog
 import adafruit_gps
 import analogio
 import board
@@ -23,28 +24,48 @@ BOARD_GP_BATTERY_MONITOR = board.GP27
 BOARD_GP_FLOWMETER = board.GP28
 
 # Voltage divider on flowmeter analog output: 10kΩ (series) + 32.6kΩ (to GND)
-# Divider ratio: 32.6 / (10 + 32.6) = 0.7652
-# TSI 4121: 0–4V = 0–20 Std L/min
 _FLOW_DIVIDER_RATIO = 32.6 / (10.0 + 32.6)
 _FLOW_FULL_SCALE_V = 4.0
 _FLOW_FULL_SCALE_LMIN = 20.0
 _FLOW_OFFSET_LMIN = 0.25  # calibrate: set to flow() reading with pump off
 
-# Battery voltage calibration factor (6S Li-ion monitor, calibrated against multimeter)
-# raw_adc=2.44417V -> reported 24.44V, multimeter=24.82V -> factor=24.82/2.44417=10.15
+# Battery voltage calibration (6S Li-ion, calibrated against multimeter)
+# raw_adc=2.44417V -> reported 24.44V, multimeter=24.82V -> factor=10.15
 _BAT_CAL_FACTOR = 10.15
-
-# Battery thresholds (6S Li-ion: 4.2V*6=25.2V full, 3.3V*6=19.8V warning, 3.1V*6=18.6V cutoff)
-_BAT_WARN_V = 19.8
-_BAT_CUTOFF_V = 18.6
+_BAT_WARN_V = 19.8    # 3.3V * 6
+_BAT_CUTOFF_V = 18.6  # 3.1V * 6
 
 # CPU temperature thresholds (Celsius)
 _TEMP_WARN_C = 45.0
 _TEMP_CRITICAL_C = 55.0
 
+# Watchdog: reset if main loop hangs for more than this many seconds
+_WATCHDOG_TIMEOUT_S = 30
+
 i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
 _rtc = rtc.RTC()
 _rtc_synced = False
+_wdt = None
+
+
+def _init_watchdog():
+    global _wdt
+    try:
+        _wdt = microcontroller.watchdog
+        _wdt.timeout = _WATCHDOG_TIMEOUT_S
+        _wdt.mode = watchdog.WatchDogMode.RESET
+        _wdt.feed()
+    except Exception as e:
+        print("Watchdog init failed: {}".format(e))
+        _wdt = None
+
+
+def _feed_watchdog():
+    if _wdt is not None:
+        try:
+            _wdt.feed()
+        except Exception:
+            pass
 
 
 def _format_rtc_time():
@@ -170,6 +191,7 @@ class GPS:
         while not gps.has_fix and (time.time() - start_time < timeout) and attempts < max_attempts:
             self.logger.debug("Waiting for GPS fix...")
             gps.update()
+            _feed_watchdog()  # GPS wait loop can be slow
             time.sleep(1)
             attempts += 1
         if not gps.has_fix:
@@ -199,20 +221,26 @@ class GPS:
         return None, None, None, None
 
 
-def _check_safety(pump, logger):
-    """Check CPU temperature. Cut pump if critical."""
+def _check_safety(pump, bat_v, logger):
+    """Check CPU temperature and battery. Cut pump if critical."""
     cpu_temp = microcontroller.cpu.temperature
     if cpu_temp >= _TEMP_CRITICAL_C:
         logger.error("CPU temp critical: {:.1f}C — cutting pump".format(cpu_temp))
         pump.emergency_off()
     elif cpu_temp >= _TEMP_WARN_C:
         logger.warning("CPU temp warning: {:.1f}C".format(cpu_temp))
-    return cpu_temp
+    if bat_v > 1.0:
+        if bat_v <= _BAT_CUTOFF_V:
+            logger.error("Battery critical: {:.2f}V — cutting pump".format(bat_v))
+            pump.emergency_off()
+        elif bat_v <= _BAT_WARN_V:
+            logger.warning("Battery low: {:.2f}V".format(bat_v))
 
 
 def _failed_sensors_loop(lora, logger):
     logger.error("Failed to initialize sensors, entering failed sensors loop")
     while True:
+        _feed_watchdog()
         led.blink(13, tsleep=0.2, bsleep=0.1, esleep=0.1)
         lora.send(b"Failed to init sensors\n")
         time.sleep(2)
@@ -221,6 +249,7 @@ def _failed_sensors_loop(lora, logger):
 def _failed_reading_data(lora, logger):
     logger.error("Failed to read data")
     for _ in range(10):
+        _feed_watchdog()
         led.blink(7, tsleep=0.2, bsleep=0.1, esleep=0.1)
         lora.send(b"Failed to read data\n")
         time.sleep(2)
@@ -284,6 +313,9 @@ def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
 
 def main_loop(lora, payload_id, logger):
     logger.info("Starting main loop")
+    _init_watchdog()
+    logger.info("Watchdog armed ({} s timeout)".format(_WATCHDOG_TIMEOUT_S))
+
     try:
         rh_sensor = Sht85Sensor(logger, i2c_bus)
         valve = Valve(logger)
@@ -301,22 +333,14 @@ def main_loop(lora, payload_id, logger):
     data = {}
 
     while True:
+        _feed_watchdog()
         led.blink(1)
 
         try:
             data = _collect_data(
                 payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time
             )
-            _check_safety(pump, logger)
-            bat_v = data["battery_voltage"]
-            if bat_v > 1.0:  # skip when no battery connected (reads ~0V)
-                if bat_v <= _BAT_CUTOFF_V:
-                    logger.error("Battery critical: {:.2f}V — cutting pump".format(bat_v))
-                    pump.emergency_off()
-                    data["pump_front_state"] = pump.get_front_state()
-                    data["pump_back_state"] = pump.get_back_state()
-                elif bat_v <= _BAT_WARN_V:
-                    logger.warning("Battery low: {:.2f}V".format(bat_v))
+            _check_safety(pump, data["battery_voltage"], logger)
             led.blink(2)
             logger.data(data)
             logger.info("Sensor data collected")
@@ -325,10 +349,12 @@ def main_loop(lora, payload_id, logger):
             _failed_reading_data(lora, logger)
             continue
 
+        _feed_watchdog()
         led.blink(3)
         deadline = time.time() + 12
         got_cmd = False
         while time.time() < deadline:
+            _feed_watchdog()
             msg = lora.receive(timeout=1)
             if msg is not None:
                 _handle_command(msg, data, pump, valve, lora, payload_id, logger)
