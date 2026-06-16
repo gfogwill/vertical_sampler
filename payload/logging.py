@@ -21,14 +21,13 @@ class Logger:
     def _log(self, level_name, message):
         if LOG_LEVELS[level_name] >= self.level:
             log_time = self._get_formatted_time()
-            log_message = "{} - {} - {} - {}".format(log_time, level_name, self.name, message)
-            try:
-                self.sd_card.write(log_message + "\n")
-            except Exception as e:
-                print("Failed to write to log file:", e)
+            log_message = "{} - {} - {} - {}\n".format(log_time, level_name, self.name, message)
+            self.sd_card.write_log(log_message)
 
-    def data(self, message):
-        self._log("DATA", message)
+    def data(self, d):
+        """Write a data dict to the data file and a DATA line to the log."""
+        self._log("DATA", "sample written to {}".format(self.sd_card.data_fname))
+        self.sd_card.write_data(d)
 
     def debug(self, message):
         self._log("DEBUG", message)
