@@ -1,5 +1,6 @@
 import json
 import time
+import rtc
 import adafruit_gps
 import analogio
 import board
@@ -30,6 +31,16 @@ _FLOW_FULL_SCALE_LMIN = 20.0
 _FLOW_OFFSET_LMIN = 0.25  # calibrate: set to flow() reading with pump off
 
 i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
+_rtc = rtc.RTC()
+_rtc_synced = False
+
+
+def _format_rtc_time():
+    t = _rtc.datetime
+    return "{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}".format(
+        t.tm_year, t.tm_mon, t.tm_mday,
+        t.tm_hour, t.tm_min, t.tm_sec
+    )
 
 
 class Pump:
@@ -135,6 +146,7 @@ class GPS:
         logger.info("GPS initialized")
 
     def lat_lon_alt_time(self, max_attempts=5, timeout=10):
+        global _rtc_synced
         gps = self.sensor
         gps.update()
         start_time = time.time()
@@ -156,6 +168,14 @@ class GPS:
             alt = gps.altitude_m
             try:
                 if all(x is not None for x in (lat, lon, alt, time_)):
+                    # Sync RTC once from GPS
+                    if not _rtc_synced:
+                        try:
+                            _rtc.datetime = time_
+                            _rtc_synced = True
+                            self.logger.info("RTC synced from GPS")
+                        except Exception as e:
+                            self.logger.warning("RTC sync failed: {}".format(e))
                     return lat, lon, alt, time_
             except Exception as e:
                 self.logger.error("Error processing GPS data: {}".format(e))
@@ -186,6 +206,7 @@ def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, 
     rh_humidity, rh_temperature = rh_sensor.humidity_and_temperature()
     return {
         "payload_id": payload_id,
+        "rtc_time": _format_rtc_time(),
         "gps_time": elapsed_time,
         "gps_latitude": lat,
         "gps_longitude": lon,
