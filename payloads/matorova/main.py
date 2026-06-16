@@ -19,10 +19,11 @@ spi = busio.SPI(BOARD_GP_LORA_SCK, MOSI=BOARD_GP_LORA_TX, MISO=BOARD_GP_LORA_RX)
 
 
 def main():
-    sd_card = SDCard(spi, fname="log.txt")
+    sd_card = SDCard(spi, payload_id=PAYLOAD_ID)
     logger = logging.getLogger("matorova-main", sd_card)
 
     logger.info("Starting matorova payload")
+    logger.info("Data file: {}".format(sd_card.data_fname))
 
     try:
         lora = LoRa(

@@ -258,7 +258,7 @@ def main_loop(lora, payload_id, logger):
                 payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time
             )
             led.blink(2)
-            logger.data(str(data))
+            logger.data(data)
             logger.info("Sensor data collected")
         except Exception as err:
             logger.error("Error reading data: {}".format(err))
