@@ -30,6 +30,10 @@ _FLOW_FULL_SCALE_V = 4.0
 _FLOW_FULL_SCALE_LMIN = 20.0
 _FLOW_OFFSET_LMIN = 0.25  # calibrate: set to flow() reading with pump off
 
+# Battery voltage calibration factor (6S Li-ion monitor, calibrated against multimeter)
+# raw_adc=2.44417V -> reported 24.44V, multimeter=24.82V -> factor=24.82/2.44417=10.15
+_BAT_CAL_FACTOR = 10.15
+
 # Battery thresholds (6S Li-ion: 4.2V*6=25.2V full, 3.3V*6=19.8V warning, 3.1V*6=18.6V cutoff)
 _BAT_WARN_V = 19.8
 _BAT_CUTOFF_V = 18.6
@@ -144,10 +148,7 @@ class Battery:
 
     def voltage(self):
         raw = self.v.value * 3.3 / 65535
-        # TODO: replace 10 with calibrated factor once measured against multimeter
-        v = 10 * raw
-        print("[BAT CAL] raw_adc={:.5f} V  reported={:.3f} V".format(raw, v))
-        return v
+        return _BAT_CAL_FACTOR * raw
 
 
 class GPS:
@@ -199,7 +200,7 @@ class GPS:
 
 
 def _check_safety(pump, logger):
-    """Check battery voltage and CPU temperature. Cut pump if critical."""
+    """Check CPU temperature. Cut pump if critical."""
     cpu_temp = microcontroller.cpu.temperature
     if cpu_temp >= _TEMP_CRITICAL_C:
         logger.error("CPU temp critical: {:.1f}C — cutting pump".format(cpu_temp))
@@ -306,7 +307,6 @@ def main_loop(lora, payload_id, logger):
             data = _collect_data(
                 payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time
             )
-            # Safety checks every cycle
             _check_safety(pump, logger)
             bat_v = data["battery_voltage"]
             if bat_v > 1.0:  # skip when no battery connected (reads ~0V)
