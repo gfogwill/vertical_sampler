@@ -34,32 +34,40 @@ PAYLOAD_CYCLE_S  = 35
 RETRY_INTERVAL_S = 5
 MAX_RETRIES      = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
 
-POLL_INTERVAL_S  = 30  # monitor: seconds between automatic data polls
-
 FIELDS = [
-    ("gps_latitude",               "Latitude",           "°",     "GPS"),
-    ("gps_longitude",              "Longitude",          "°",     "GPS"),
-    ("gps_altitude",               "Altitude (GPS)",     "m",     "GPS"),
-    ("gps_time",                   "Time (GPS)",         "UTC",   "GPS"),
-    ("rh_sensor_humidity",         "Humidity",           "%RH",   "Atmosphere"),
-    ("rh_sensor_temperature",      "Temperature (RH)",   "°C",    "Atmosphere"),
-    ("pressure_sensor_pressure",   "Pressure",           "hPa",   "Atmosphere"),
-    ("pressure_sensor_temperature", "Temperature (P)",   "°C",    "Atmosphere"),
-    ("_pressure_altitude",         "Altitude (P)",       "m",     "Atmosphere"),
-    ("flow",                       "Flow",               "L/min", "Sampler"),
-    ("pump_front_state",           "Pump front",         "",      "Sampler"),
-    ("pump_back_state",            "Pump back",          "",      "Sampler"),
-    ("valve_state",                "Valve",              "",      "Sampler"),
-    ("battery_voltage",            "Battery",            "V",     "System"),
-    ("cpu_temperature",            "CPU temp",           "°C",    "System"),
-    ("rssi",                       "RSSI",               "dBm",   "System"),
+    ("gps_latitude",                "Latitude",          "\u00b0",    "GPS"),
+    ("gps_longitude",               "Longitude",         "\u00b0",    "GPS"),
+    ("gps_altitude",                "Altitude (GPS)",    "m",     "GPS"),
+    ("gps_time",                    "Time (GPS)",        "UTC",   "GPS"),
+    ("rh_sensor_humidity",          "Humidity",          "%RH",   "Atmosphere"),
+    ("rh_sensor_temperature",       "Temperature (RH)",  "\u00b0C",   "Atmosphere"),
+    ("pressure_sensor_pressure",    "Pressure",          "hPa",   "Atmosphere"),
+    ("pressure_sensor_temperature", "Temperature (P)",   "\u00b0C",   "Atmosphere"),
+    ("_pressure_altitude",          "Altitude (P)",      "m",     "Atmosphere"),
+    ("flow",                        "Flow",              "L/min", "Sampler"),
+    ("pump_front_state",            "Pump front",        "",      "Sampler"),
+    ("pump_back_state",             "Pump back",         "",      "Sampler"),
+    ("valve_state",                 "Valve",             "",      "Sampler"),
+    ("battery_voltage",             "Battery",           "V",     "System"),
+    ("cpu_temperature",             "CPU temp",          "\u00b0C",   "System"),
+    ("rssi",                        "RSSI",              "dBm",   "System"),
 ]
 
 GROUP_ORDER = ["GPS", "Atmosphere", "Sampler", "System"]
 
+# Control key map: key -> (payload_index, actuator, label)
+# Uppercase = matorova (index 0), lowercase = kenttarova (index 1)
+_CTRL_KEYS = {
+    ord('F'): (0, "pump", "front"),
+    ord('f'): (1, "pump", "front"),
+    ord('B'): (0, "pump", "back"),
+    ord('b'): (1, "pump", "back"),
+    ord('V'): (0, "valve", None),
+    ord('v'): (1, "valve", None),
+}
+
 
 def _pressure_altitude(pressure_hpa, qnh_hpa):
-    """ISA pressure altitude relative to QNH (metres)."""
     try:
         return 44330.0 * (1.0 - math.pow(pressure_hpa / qnh_hpa, 0.1903))
     except Exception:
@@ -67,30 +75,24 @@ def _pressure_altitude(pressure_hpa, qnh_hpa):
 
 
 def _fmt_value(key, val):
-    """Format a raw value for display. Returns (display_str, is_fill)."""
     if val is None:
         return "N/A", True
     if isinstance(val, float) and abs(val - FILL_FLOAT) < 1:
         return "N/A", True
     if isinstance(val, int) and val in (FILL_INT, FILL_UINT):
         return "N/A", True
-
     if key == "gps_time":
         try:
             ts = datetime.datetime.utcfromtimestamp(val)
             return ts.strftime("%H:%M:%S"), False
         except Exception:
             return str(val), False
-
     if key in ("pump_front_state", "pump_back_state"):
         return ("ON" if val else "OFF"), False
-
     if key == "valve_state":
         return str(val), False
-
     if isinstance(val, float):
         return "{:.2f}".format(val), False
-
     return str(val), False
 
 
@@ -99,24 +101,19 @@ def pretty_print(data, payload_id=""):
     COL_VALUE = 10
     COL_UNIT  = 7
     W = COL_LABEL + COL_VALUE + COL_UNIT + 6
-
     title = "  {}  ".format(payload_id.upper() if payload_id else "TELEMETRY")
-
     lines = []
-    lines.append("╔" + "═" * W + "╗")
-    lines.append("║" + title.center(W) + "║")
-    lines.append("╠" + "═" * (COL_LABEL + 2) + "╦" + "═" * (COL_VALUE + 2) + "╦" + "═" * (COL_UNIT + 2) + "╣")
-
+    lines.append("\u2554" + "\u2550" * W + "\u2557")
+    lines.append("\u2551" + title.center(W) + "\u2551")
+    lines.append("\u2560" + "\u2550" * (COL_LABEL + 2) + "\u2566" + "\u2550" * (COL_VALUE + 2) + "\u2566" + "\u2550" * (COL_UNIT + 2) + "\u2563")
     grouped = {g: [] for g in GROUP_ORDER}
     for key, label, unit, group in FIELDS:
         if key.startswith("_"):
             continue
         grouped[group].append((key, label, unit))
-
     for g_idx, group in enumerate(GROUP_ORDER):
         group_title = "  " + group
-        lines.append("║ " + group_title.ljust(COL_LABEL) + " ║ " + " " * COL_VALUE + " ║ " + " " * COL_UNIT + " ║")
-
+        lines.append("\u2551 " + group_title.ljust(COL_LABEL) + " \u2551 " + " " * COL_VALUE + " \u2551 " + " " * COL_UNIT + " \u2551")
         for key, label, unit in grouped[group]:
             val = data.get(key)
             val_str, is_fill = _fmt_value(key, val)
@@ -125,20 +122,17 @@ def pretty_print(data, payload_id=""):
                 val_str = "N/A"
                 unit = ""
             lines.append(
-                "║ " + label_col.ljust(COL_LABEL) +
-                " ║ " + val_str.rjust(COL_VALUE) +
-                " ║ " + unit.ljust(COL_UNIT) + " ║"
+                "\u2551 " + label_col.ljust(COL_LABEL) +
+                " \u2551 " + val_str.rjust(COL_VALUE) +
+                " \u2551 " + unit.ljust(COL_UNIT) + " \u2551"
             )
-
         if g_idx < len(GROUP_ORDER) - 1:
-            lines.append("╠" + "═" * (COL_LABEL + 2) + "╬" + "═" * (COL_VALUE + 2) + "╬" + "═" * (COL_UNIT + 2) + "╣")
-
-    lines.append("╚" + "═" * (COL_LABEL + 2) + "╩" + "═" * (COL_VALUE + 2) + "╩" + "═" * (COL_UNIT + 2) + "╝")
+            lines.append("\u2560" + "\u2550" * (COL_LABEL + 2) + "\u256c" + "\u2550" * (COL_VALUE + 2) + "\u256c" + "\u2550" * (COL_UNIT + 2) + "\u2563")
+    lines.append("\u255a" + "\u2550" * (COL_LABEL + 2) + "\u2569" + "\u2550" * (COL_VALUE + 2) + "\u2569" + "\u2550" * (COL_UNIT + 2) + "\u255d")
     print("\n" + "\n".join(lines) + "\n")
 
 
 def find_serial(baudrate=9600, timeout=2):
-    """Find the first available USB serial port (ground station Pico)."""
     import serial.tools.list_ports
     ports = list(serial.tools.list_ports.comports())
     for port in ports:
@@ -161,7 +155,6 @@ def _build_cmd(args):
 
 
 def _read_json_line(ser, timeout_s):
-    """Read lines from ser until a valid JSON line is found or timeout expires."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if ser.in_waiting:
@@ -181,18 +174,14 @@ def _read_json_line(ser, timeout_s):
 
 def relay_cmd(args):
     cmd = _build_cmd(args)
-
     with find_serial() as ser:
         time.sleep(0.2)
         ser.reset_input_buffer()
-
         for attempt in range(1, MAX_RETRIES + 1):
             print("Sending command (attempt {}/{})...".format(attempt, MAX_RETRIES), end="", flush=True)
             ser.write(cmd)
             ser.flush()
-
             data = _read_json_line(ser, timeout_s=RETRY_INTERVAL_S)
-
             if data is not None:
                 print(" OK")
                 if args.subcommand == "data":
@@ -200,9 +189,7 @@ def relay_cmd(args):
                 else:
                     print(json.dumps(data, indent=2))
                 return
-
             print(" no response, retrying...")
-
         print("ERROR: no response from {} after {} attempts (~{}s).".format(
             args.payload, MAX_RETRIES, MAX_RETRIES * RETRY_INTERVAL_S
         ))
@@ -215,16 +202,18 @@ def relay_cmd(args):
 MAX_EVENTS = 8
 _PAYLOADS_ALL = [Payload.MATOROVA, Payload.KENTTAROVA]
 
-_CMD_POLL_ALL = "poll_all"
-_CMD_POLL_ONE = "poll_one"
-_CMD_QUIT     = "quit"
+_CMD_POLL_ALL  = "poll_all"
+_CMD_POLL_ONE  = "poll_one"
+_CMD_CONTROL   = "control"   # (payload, cmd_bytes)
+_CMD_QUIT      = "quit"
 
 
 class PollWorker(threading.Thread):
-    """Background thread that owns the serial port and does all blocking I/O.
+    """Background thread that owns the serial port.
 
-    Main thread sends commands via cmd_q; results arrive via result_q as
-    (payload, data_dict_or_None) tuples.
+    In idle state it reads passively — heartbeats from the ground
+    station arrive as JSON lines without any poll command.  Control
+    commands and explicit poll requests are queued via cmd_q.
     """
 
     def __init__(self, payloads, qnh, log_file):
@@ -235,7 +224,24 @@ class PollWorker(threading.Thread):
         self.cmd_q = queue.Queue()
         self.result_q = queue.Queue()
 
+    def _enrich(self, d):
+        p = d.get("pressure_sensor_pressure")
+        if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
+            d["_pressure_altitude"] = _pressure_altitude(p, self.qnh)
+        else:
+            d["_pressure_altitude"] = None
+        return d
+
+    def _log(self, d):
+        if self.log_file:
+            try:
+                with open(self.log_file, "a") as f:
+                    f.write(json.dumps(d) + "\n")
+            except Exception:
+                pass
+
     def _poll_one(self, ser, payload):
+        """Send explicit data request and wait for response."""
         cmd = "{} data\n".format(payload).encode()
         ser.reset_input_buffer()
         ser.write(cmd)
@@ -243,18 +249,39 @@ class PollWorker(threading.Thread):
         d = _read_json_line(ser, timeout_s=6)
         if d is not None:
             d["_ts"] = time.time()
-            p = d.get("pressure_sensor_pressure")
-            if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
-                d["_pressure_altitude"] = _pressure_altitude(p, self.qnh)
-            else:
-                d["_pressure_altitude"] = None
-            if self.log_file:
+            self._enrich(d)
+            self._log(d)
+        self.result_q.put((payload, d))
+
+    def _send_control(self, ser, cmd_bytes):
+        """Send a pump/valve command and wait for the updated data packet."""
+        ser.reset_input_buffer()
+        ser.write(cmd_bytes)
+        ser.flush()
+        d = _read_json_line(ser, timeout_s=8)
+        if d is not None:
+            # Infer payload from pump_front_state presence (both payloads have it)
+            # The result is tagged by the caller via _CMD_CONTROL tuple.
+            d["_ts"] = time.time()
+            self._enrich(d)
+            self._log(d)
+        return d
+
+    def _try_parse_heartbeat(self, ser):
+        """Non-blocking: read one line if available, parse as JSON."""
+        if ser.in_waiting:
+            raw = ser.readline()
+            text = raw.decode(errors="ignore").strip()
+            if text.startswith("{"):
                 try:
-                    with open(self.log_file, "a") as f:
-                        f.write(json.dumps(d) + "\n")
+                    d = json.loads(text)
+                    d["_ts"] = time.time()
+                    self._enrich(d)
+                    self._log(d)
+                    # Identify payload by rssi sign or just broadcast to all
+                    self.result_q.put((None, d))  # None = heartbeat, no specific payload
                 except Exception:
                     pass
-        self.result_q.put((payload, d))
 
     def run(self):
         try:
@@ -266,26 +293,32 @@ class PollWorker(threading.Thread):
         with ser:
             time.sleep(0.2)
             ser.reset_input_buffer()
-            # Initial poll on startup
-            for p in self.payloads:
-                self._poll_one(ser, p)
 
             while True:
+                # Check for queued commands first (non-blocking)
                 try:
-                    item = self.cmd_q.get(timeout=0.1)
-                except queue.Empty:
+                    item = self.cmd_q.get_nowait()
+                    if item == _CMD_QUIT:
+                        break
+                    elif item == _CMD_POLL_ALL:
+                        for p in self.payloads:
+                            self._poll_one(ser, p)
+                    elif isinstance(item, tuple) and item[0] == _CMD_POLL_ONE:
+                        self._poll_one(ser, item[1])
+                    elif isinstance(item, tuple) and item[0] == _CMD_CONTROL:
+                        _, payload, cmd_bytes = item
+                        d = self._send_control(ser, cmd_bytes)
+                        self.result_q.put((payload, d))
                     continue
-                if item == _CMD_QUIT:
-                    break
-                elif item == _CMD_POLL_ALL:
-                    for p in self.payloads:
-                        self._poll_one(ser, p)
-                elif isinstance(item, tuple) and item[0] == _CMD_POLL_ONE:
-                    self._poll_one(ser, item[1])
+                except queue.Empty:
+                    pass
+
+                # Idle: passively read heartbeats arriving from ground
+                self._try_parse_heartbeat(ser)
+                time.sleep(0.05)
 
 
 def _safe_addnstr(win, row, col, text, max_cols, attr):
-    """addnstr that never raises curses.error due to boundary conditions."""
     import curses
     rows, cols = win.getmaxyx()
     if row < 0 or row >= rows - 1:
@@ -302,20 +335,16 @@ def _safe_addnstr(win, row, col, text, max_cols, attr):
 
 
 def _render_column(win, data, payload_label, col_x, col_w, max_rows):
-    """Draw one payload column inside window win."""
     import curses
     row = 1
-
     header = " {} ".format(payload_label.upper())
     _safe_addnstr(win, row, col_x, header.center(col_w), col_w,
                   curses.color_pair(2) | curses.A_BOLD)
     row += 1
-
     if not data:
         _safe_addnstr(win, row, col_x, "  --- no data ---".ljust(col_w), col_w,
                       curses.color_pair(3))
         return
-
     last_updated = data.get("_ts")
     if last_updated:
         age = int(time.time() - last_updated)
@@ -324,11 +353,9 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows):
         ts_str = ""
     _safe_addnstr(win, row, col_x, ts_str.ljust(col_w), col_w, curses.color_pair(4))
     row += 1
-
     grouped = {g: [] for g in GROUP_ORDER}
     for key, label, unit, group in FIELDS:
         grouped[group].append((key, label, unit))
-
     for group in GROUP_ORDER:
         if row >= max_rows:
             break
@@ -340,8 +367,16 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows):
                 break
             val = data.get(key)
             val_str, is_fill = _fmt_value(key, val)
+            # Highlight pump/valve ON state in green
+            if key in ("pump_front_state", "pump_back_state") and val:
+                attr = curses.color_pair(4) | curses.A_BOLD
+            elif key == "valve_state" and val:
+                attr = curses.color_pair(4) | curses.A_BOLD
+            elif is_fill:
+                attr = curses.color_pair(3)
+            else:
+                attr = curses.color_pair(1)
             line = "    {:<18} {:>8} {}".format(label, val_str, unit)
-            attr = curses.color_pair(3) if is_fill else curses.color_pair(1)
             _safe_addnstr(win, row, col_x, line.ljust(col_w), col_w, attr)
             row += 1
 
@@ -360,6 +395,24 @@ def _run_monitor(payloads, qnh, log_file):
         if len(events) > MAX_EVENTS:
             events.pop(0)
 
+    def _toggle_pump(payload, location):
+        """Toggle pump front or back for payload."""
+        cur = state[payload].get(
+            "pump_front_state" if location == "front" else "pump_back_state", 0
+        )
+        new_state = "off" if cur else "on"
+        cmd = "{} pump {} {}\n".format(payload, location, new_state).encode()
+        worker.cmd_q.put((_CMD_CONTROL, payload, cmd))
+        add_event("{} pump {} -> {}".format(payload, location, new_state.upper()))
+
+    def _toggle_valve(payload):
+        """Toggle valve for payload."""
+        cur = state[payload].get("valve_state", 0)
+        new_state = "off" if cur else "on"
+        cmd = "{} valve {}\n".format(payload, new_state).encode()
+        worker.cmd_q.put((_CMD_CONTROL, payload, cmd))
+        add_event("{} valve -> {}".format(payload, new_state.upper()))
+
     def draw(stdscr):
         curses.curs_set(0)
         curses.start_color()
@@ -368,41 +421,46 @@ def _run_monitor(payloads, qnh, log_file):
         curses.init_pair(2, curses.COLOR_CYAN,   -1)
         curses.init_pair(3, curses.COLOR_YELLOW, -1)
         curses.init_pair(4, curses.COLOR_GREEN,  -1)
-        stdscr.timeout(100)  # getch blocks at most 100 ms — keyboard always responsive
+        stdscr.timeout(100)
 
-        next_auto_poll = time.time() + POLL_INTERVAL_S
-        add_event("Monitor started — initial poll in progress...")
+        add_event("Monitor started. Listening for heartbeats...")
 
         while True:
-            # --- drain result queue (non-blocking) ---
+            # Drain result queue
             try:
                 while True:
                     payload, d = worker.result_q.get_nowait()
-                    if payload is None:
-                        add_event("Serial error: {}".format(d.get("_error", "?")))
-                    elif d is None:
-                        add_event("{} — no response".format(payload))
+                    if d is None:
+                        if payload:
+                            add_event("{} - no response".format(payload))
+                    elif "_error" in d:
+                        add_event("Serial error: {}".format(d["_error"]))
                     else:
-                        state[payload] = d
-                        p_val = d.get("pressure_sensor_pressure")
-                        p_str = ("{:.2f}".format(p_val)
-                                 if isinstance(p_val, float) and abs(p_val - FILL_FLOAT) > 1
-                                 else "N/A")
-                        add_event("{} OK — P={} hPa".format(payload, p_str))
+                        # Heartbeat (payload=None): match to payload by payload_id field
+                        # or update all if ambiguous
+                        target = payload
+                        if target is None:
+                            pid = d.get("payload_id", "")
+                            for p in payloads:
+                                if str(p) == pid:
+                                    target = p
+                                    break
+                        if target and target in payloads:
+                            state[target] = d
+                            p_val = d.get("pressure_sensor_pressure")
+                            p_str = ("{:.2f}".format(p_val)
+                                     if isinstance(p_val, float) and abs(p_val - FILL_FLOAT) > 1
+                                     else "N/A")
+                            add_event("{} \u2014 P={} hPa".format(target, p_str))
+                        elif target is None:
+                            # Can't identify payload, skip silently
+                            pass
             except queue.Empty:
                 pass
 
-            # --- auto poll trigger ---
-            now = time.time()
-            if now >= next_auto_poll:
-                worker.cmd_q.put(_CMD_POLL_ALL)
-                add_event("Auto-polling all payloads...")
-                next_auto_poll = now + POLL_INTERVAL_S
-
-            # --- draw ---
+            # Draw
             stdscr.erase()
             rows, cols = stdscr.getmaxyx()
-
             ts_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             header = " Vertical Sampler Monitor  {}  QNH={} hPa ".format(ts_now, qnh)
             _safe_addnstr(stdscr, 0, 0, header.ljust(cols - 1), cols - 1,
@@ -419,7 +477,7 @@ def _run_monitor(payloads, qnh, log_file):
             div_row = events_start - 1
             if 0 < div_row < rows - 1:
                 _safe_addnstr(stdscr, div_row, 0,
-                              " Events ".center(cols - 1, "─"), cols - 1,
+                              " Events ".center(cols - 1, "\u2500"), cols - 1,
                               curses.color_pair(4))
 
             for j, (evt_ts, evt_msg) in enumerate(events[-(MAX_EVENTS):]):
@@ -431,7 +489,9 @@ def _run_monitor(payloads, qnh, log_file):
                               "  {} {}".format(t_str, evt_msg).ljust(cols - 1),
                               cols - 1, curses.color_pair(1))
 
-            footer = "  r=refresh  1=matorova  2=kenttarova  q=quit  (auto {}s)".format(POLL_INTERVAL_S)
+            footer = ("  F/f=pump front  B/b=pump back  V/v=valve  "
+                      "(UPPER=matorova lower=kenttarova)  "
+                      "r=poll all  1/2=poll  q=quit")
             try:
                 stdscr.addnstr(rows - 1, 0, footer.ljust(cols - 1), cols - 1,
                                curses.color_pair(2) | curses.A_REVERSE)
@@ -441,40 +501,53 @@ def _run_monitor(payloads, qnh, log_file):
             stdscr.noutrefresh()
             curses.doupdate()
 
-            # --- key input — never blocks > 100 ms ---
+            # Key input
             ch = stdscr.getch()
             if ch == ord('q'):
                 worker.cmd_q.put(_CMD_QUIT)
                 break
             elif ch == ord('r'):
                 worker.cmd_q.put(_CMD_POLL_ALL)
-                add_event("Manual refresh requested...")
-                next_auto_poll = time.time() + POLL_INTERVAL_S
+                add_event("Manual poll all...")
             elif ch == ord('1') and len(payloads) >= 1:
                 worker.cmd_q.put((_CMD_POLL_ONE, payloads[0]))
                 add_event("Polling {}...".format(payloads[0]))
             elif ch == ord('2') and len(payloads) >= 2:
                 worker.cmd_q.put((_CMD_POLL_ONE, payloads[1]))
                 add_event("Polling {}...".format(payloads[1]))
+            elif ch in _CTRL_KEYS:
+                p_idx, actuator, location = _CTRL_KEYS[ch]
+                if p_idx < len(payloads):
+                    p = payloads[p_idx]
+                    if actuator == "pump":
+                        _toggle_pump(p, location)
+                    elif actuator == "valve":
+                        _toggle_valve(p)
 
     try:
         curses.wrapper(draw)
     except Exception as exc:
         worker.cmd_q.put(_CMD_QUIT)
         print("[monitor] curses error ({}), falling back to plain poll.".format(exc))
+        # Plain fallback: just poll once and print
+        worker2 = PollWorker(payloads, qnh, log_file)
+        worker2.start()
+        worker2.cmd_q.put(_CMD_POLL_ALL)
         received = set()
-        deadline = time.time() + 30
+        deadline = time.time() + 40
+        state2 = {p: {} for p in payloads}
         while len(received) < len(payloads) and time.time() < deadline:
             try:
-                payload, d = worker.result_q.get(timeout=1)
-                if payload and d:
-                    state[payload] = d
+                payload, d = worker2.result_q.get(timeout=1)
+                if payload and d and "_error" not in d:
+                    state2[payload] = d
                     received.add(payload)
             except queue.Empty:
                 pass
+        worker2.cmd_q.put(_CMD_QUIT)
         for p in payloads:
-            if state[p]:
-                pretty_print(state[p], payload_id=str(p))
+            if state2[p]:
+                pretty_print(state2[p], payload_id=str(p))
 
 
 def parse_args():
@@ -495,17 +568,9 @@ def parse_args():
         "--payloads", nargs="+", type=Payload,
         choices=list(Payload), default=_PAYLOADS_ALL,
         metavar="PAYLOAD",
-        help="Payloads to monitor (default: both)"
     )
-    mon.add_argument(
-        "--qnh", type=float, default=1013.25,
-        help="QNH altimeter setting in hPa (default: 1013.25 ISA)"
-    )
-    mon.add_argument(
-        "--log-file", dest="log_file", default=None,
-        metavar="FILE",
-        help="Append received data records as JSONL to FILE"
-    )
+    mon.add_argument("--qnh", type=float, default=1013.25)
+    mon.add_argument("--log-file", dest="log_file", default=None, metavar="FILE")
 
     return parser.parse_args()
 

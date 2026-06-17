@@ -67,7 +67,6 @@ while True:
     led.blink(ntimes=3, bsleep=0.1, tsleep=0.1, esleep=0.1)
     if POLL.poll(0):
         cmd_str = sys.stdin.readline().strip().lower()
-        # Skip empty lines and JSON echoes
         if not cmd_str or cmd_str.startswith("{"):
             continue
         try:
@@ -77,3 +76,13 @@ while True:
         except Exception as e:
             err = str(e).replace('"', "'").replace("\n", " ")
             print('{"error": "' + err + '"}')
+    else:
+        # No serial command waiting — listen passively for heartbeats.
+        msg = lora.receive(timeout=1)
+        if msg is not None and isinstance(msg, (bytes, bytearray)):
+            led.blink(ntimes=2, bsleep=0.1, tsleep=0.1, esleep=0.1)
+            try:
+                d = pack.bytes2dict(msg)
+                print(json.dumps(d))
+            except Exception:
+                pass  # ignore non-pack bytes (e.g. stray text frames)
