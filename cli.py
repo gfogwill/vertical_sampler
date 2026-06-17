@@ -1,6 +1,8 @@
 import argparse
 import json
 import math
+import queue
+import threading
 import time
 from enum import Enum
 import datetime
@@ -32,7 +34,7 @@ PAYLOAD_CYCLE_S  = 35
 RETRY_INTERVAL_S = 5
 MAX_RETRIES      = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
 
-POLL_INTERVAL_S  = 5   # monitor: seconds between automatic data polls
+POLL_INTERVAL_S  = 30  # monitor: seconds between automatic data polls
 
 FIELDS = [
     ("gps_latitude",               "Latitude",           "°",     "GPS"),
@@ -108,7 +110,7 @@ def pretty_print(data, payload_id=""):
     grouped = {g: [] for g in GROUP_ORDER}
     for key, label, unit, group in FIELDS:
         if key.startswith("_"):
-            continue  # skip computed fields in plain output
+            continue
         grouped[group].append((key, label, unit))
 
     for g_idx, group in enumerate(GROUP_ORDER):
@@ -211,43 +213,86 @@ def relay_cmd(args):
 # ---------------------------------------------------------------------------
 
 MAX_EVENTS = 8
-
 _PAYLOADS_ALL = [Payload.MATOROVA, Payload.KENTTAROVA]
 
-
-def _poll_payload(ser, payload, timeout_s=6):
-    """Send a 'data' request and return the parsed dict or None."""
-    cmd = "{} data\n".format(payload).encode()
-    ser.reset_input_buffer()
-    ser.write(cmd)
-    ser.flush()
-    return _read_json_line(ser, timeout_s=timeout_s)
+_CMD_POLL_ALL = "poll_all"
+_CMD_POLL_ONE = "poll_one"
+_CMD_QUIT     = "quit"
 
 
-def _enrich(data, qnh):
-    """Add computed pressure altitude in-place."""
-    p = data.get("pressure_sensor_pressure")
-    if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
-        data["_pressure_altitude"] = _pressure_altitude(p, qnh)
-    else:
-        data["_pressure_altitude"] = None
-    return data
+class PollWorker(threading.Thread):
+    """Background thread that owns the serial port and does all blocking I/O.
+
+    Main thread sends commands via cmd_q; results arrive via result_q as
+    (payload, data_dict_or_None) tuples.
+    """
+
+    def __init__(self, payloads, qnh, log_file):
+        super().__init__(daemon=True)
+        self.payloads = payloads
+        self.qnh = qnh
+        self.log_file = log_file
+        self.cmd_q = queue.Queue()
+        self.result_q = queue.Queue()
+
+    def _poll_one(self, ser, payload):
+        cmd = "{} data\n".format(payload).encode()
+        ser.reset_input_buffer()
+        ser.write(cmd)
+        ser.flush()
+        d = _read_json_line(ser, timeout_s=6)
+        if d is not None:
+            d["_ts"] = time.time()
+            p = d.get("pressure_sensor_pressure")
+            if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
+                d["_pressure_altitude"] = _pressure_altitude(p, self.qnh)
+            else:
+                d["_pressure_altitude"] = None
+            if self.log_file:
+                try:
+                    with open(self.log_file, "a") as f:
+                        f.write(json.dumps(d) + "\n")
+                except Exception:
+                    pass
+        self.result_q.put((payload, d))
+
+    def run(self):
+        try:
+            ser = find_serial(baudrate=9600, timeout=0.5)
+        except Exception as e:
+            self.result_q.put((None, {"_error": str(e)}))
+            return
+
+        with ser:
+            time.sleep(0.2)
+            ser.reset_input_buffer()
+            # Initial poll on startup
+            for p in self.payloads:
+                self._poll_one(ser, p)
+
+            while True:
+                try:
+                    item = self.cmd_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if item == _CMD_QUIT:
+                    break
+                elif item == _CMD_POLL_ALL:
+                    for p in self.payloads:
+                        self._poll_one(ser, p)
+                elif isinstance(item, tuple) and item[0] == _CMD_POLL_ONE:
+                    self._poll_one(ser, item[1])
 
 
 def _safe_addnstr(win, row, col, text, max_cols, attr):
-    """addnstr wrapper that silently skips writes outside the terminal area.
-
-    curses raises ERR (which Python turns into an exception) when any part
-    of the write touches the last cell of the last line, or when row/col are
-    out of bounds.  We clamp aggressively so the TUI never crashes.
-    """
+    """addnstr that never raises curses.error due to boundary conditions."""
     import curses
     rows, cols = win.getmaxyx()
-    if row < 0 or row >= rows - 1:   # never write on the very last row via this helper
+    if row < 0 or row >= rows - 1:
         return
     if col < 0 or col >= cols - 1:
         return
-    avail = min(max_cols, cols - col - 1)  # leave at least 1 char margin
+    avail = min(max_cols, cols - col - 1)
     if avail <= 0:
         return
     try:
@@ -256,12 +301,11 @@ def _safe_addnstr(win, row, col, text, max_cols, attr):
         pass
 
 
-def _render_column(win, data, payload_label, col_x, col_w, max_rows, qnh):
+def _render_column(win, data, payload_label, col_x, col_w, max_rows):
     """Draw one payload column inside window win."""
     import curses
-    row = 1  # row 0 is the global header
+    row = 1
 
-    # Column header
     header = " {} ".format(payload_label.upper())
     _safe_addnstr(win, row, col_x, header.center(col_w), col_w,
                   curses.color_pair(2) | curses.A_BOLD)
@@ -303,10 +347,12 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows, qnh):
 
 
 def _run_monitor(payloads, qnh, log_file):
-    """curses-based TUI monitor."""
     import curses
 
-    state = {p: {} for p in payloads}
+    worker = PollWorker(payloads, qnh, log_file)
+    worker.start()
+
+    state  = {p: {} for p in payloads}
     events = []
 
     def add_event(msg):
@@ -314,43 +360,7 @@ def _run_monitor(payloads, qnh, log_file):
         if len(events) > MAX_EVENTS:
             events.pop(0)
 
-    def poll_all(ser):
-        for p in payloads:
-            add_event("Polling {}...".format(p))
-            d = _poll_payload(ser, p)
-            if d is not None:
-                d["_ts"] = time.time()
-                _enrich(d, qnh)
-                state[p] = d
-                if log_file:
-                    try:
-                        with open(log_file, "a") as f:
-                            f.write(json.dumps(d) + "\n")
-                    except Exception as e:
-                        add_event("Log error: {}".format(e))
-                add_event("{} OK — P={} hPa".format(
-                    p, d.get("pressure_sensor_pressure", "N/A")))
-            else:
-                add_event("{} — no response".format(p))
-
-    def poll_one(ser, p):
-        add_event("Polling {}...".format(p))
-        d = _poll_payload(ser, p)
-        if d is not None:
-            d["_ts"] = time.time()
-            _enrich(d, qnh)
-            state[p] = d
-            if log_file:
-                try:
-                    with open(log_file, "a") as f:
-                        f.write(json.dumps(d) + "\n")
-                except Exception as e:
-                    add_event("Log error: {}".format(e))
-            add_event("{} OK".format(p))
-        else:
-            add_event("{} — no response".format(p))
-
-    def draw(stdscr, ser):
+    def draw(stdscr):
         curses.curs_set(0)
         curses.start_color()
         curses.use_default_colors()
@@ -358,43 +368,60 @@ def _run_monitor(payloads, qnh, log_file):
         curses.init_pair(2, curses.COLOR_CYAN,   -1)
         curses.init_pair(3, curses.COLOR_YELLOW, -1)
         curses.init_pair(4, curses.COLOR_GREEN,  -1)
-        stdscr.timeout(200)
+        stdscr.timeout(100)  # getch blocks at most 100 ms — keyboard always responsive
 
-        next_poll = time.time()
+        next_auto_poll = time.time() + POLL_INTERVAL_S
+        add_event("Monitor started — initial poll in progress...")
 
         while True:
-            now = time.time()
-            if now >= next_poll:
-                poll_all(ser)
-                next_poll = now + POLL_INTERVAL_S
+            # --- drain result queue (non-blocking) ---
+            try:
+                while True:
+                    payload, d = worker.result_q.get_nowait()
+                    if payload is None:
+                        add_event("Serial error: {}".format(d.get("_error", "?")))
+                    elif d is None:
+                        add_event("{} — no response".format(payload))
+                    else:
+                        state[payload] = d
+                        p_val = d.get("pressure_sensor_pressure")
+                        p_str = ("{:.2f}".format(p_val)
+                                 if isinstance(p_val, float) and abs(p_val - FILL_FLOAT) > 1
+                                 else "N/A")
+                        add_event("{} OK — P={} hPa".format(payload, p_str))
+            except queue.Empty:
+                pass
 
+            # --- auto poll trigger ---
+            now = time.time()
+            if now >= next_auto_poll:
+                worker.cmd_q.put(_CMD_POLL_ALL)
+                add_event("Auto-polling all payloads...")
+                next_auto_poll = now + POLL_INTERVAL_S
+
+            # --- draw ---
             stdscr.erase()
             rows, cols = stdscr.getmaxyx()
 
-            # Header
             ts_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             header = " Vertical Sampler Monitor  {}  QNH={} hPa ".format(ts_now, qnh)
             _safe_addnstr(stdscr, 0, 0, header.ljust(cols - 1), cols - 1,
                           curses.color_pair(2) | curses.A_REVERSE)
 
-            # Two payload columns
             n = len(payloads)
             col_w = max(1, cols // max(n, 1))
             events_start = max(3, rows - MAX_EVENTS - 2)
             data_rows = events_start - 1
 
             for i, p in enumerate(payloads):
-                _render_column(stdscr, state[p], str(p), i * col_w, col_w,
-                               data_rows, qnh)
+                _render_column(stdscr, state[p], str(p), i * col_w, col_w, data_rows)
 
-            # Events divider
             div_row = events_start - 1
             if 0 < div_row < rows - 1:
                 _safe_addnstr(stdscr, div_row, 0,
                               " Events ".center(cols - 1, "─"), cols - 1,
                               curses.color_pair(4))
 
-            # Events lines
             for j, (evt_ts, evt_msg) in enumerate(events[-(MAX_EVENTS):]):
                 er = events_start + j
                 if er >= rows - 1:
@@ -404,8 +431,7 @@ def _run_monitor(payloads, qnh, log_file):
                               "  {} {}".format(t_str, evt_msg).ljust(cols - 1),
                               cols - 1, curses.color_pair(1))
 
-            # Footer (last row — use addnstr directly with A_REVERSE)
-            footer = "  r=refresh  1=matorova  2=kenttarova  q=quit"
+            footer = "  r=refresh  1=matorova  2=kenttarova  q=quit  (auto {}s)".format(POLL_INTERVAL_S)
             try:
                 stdscr.addnstr(rows - 1, 0, footer.ljust(cols - 1), cols - 1,
                                curses.color_pair(2) | curses.A_REVERSE)
@@ -415,29 +441,40 @@ def _run_monitor(payloads, qnh, log_file):
             stdscr.noutrefresh()
             curses.doupdate()
 
+            # --- key input — never blocks > 100 ms ---
             ch = stdscr.getch()
             if ch == ord('q'):
+                worker.cmd_q.put(_CMD_QUIT)
                 break
             elif ch == ord('r'):
-                poll_all(ser)
-                next_poll = time.time() + POLL_INTERVAL_S
+                worker.cmd_q.put(_CMD_POLL_ALL)
+                add_event("Manual refresh requested...")
+                next_auto_poll = time.time() + POLL_INTERVAL_S
             elif ch == ord('1') and len(payloads) >= 1:
-                poll_one(ser, payloads[0])
+                worker.cmd_q.put((_CMD_POLL_ONE, payloads[0]))
+                add_event("Polling {}...".format(payloads[0]))
             elif ch == ord('2') and len(payloads) >= 2:
-                poll_one(ser, payloads[1])
+                worker.cmd_q.put((_CMD_POLL_ONE, payloads[1]))
+                add_event("Polling {}...".format(payloads[1]))
 
-    with find_serial() as ser:
-        time.sleep(0.2)
-        ser.reset_input_buffer()
-        try:
-            import curses as _curses
-            _curses.wrapper(draw, ser)
-        except Exception as exc:
-            print("[monitor] curses unavailable ({}), falling back to plain poll.".format(exc))
-            poll_all(ser)
-            for p in payloads:
-                if state[p]:
-                    pretty_print(state[p], payload_id=str(p))
+    try:
+        curses.wrapper(draw)
+    except Exception as exc:
+        worker.cmd_q.put(_CMD_QUIT)
+        print("[monitor] curses error ({}), falling back to plain poll.".format(exc))
+        received = set()
+        deadline = time.time() + 30
+        while len(received) < len(payloads) and time.time() < deadline:
+            try:
+                payload, d = worker.result_q.get(timeout=1)
+                if payload and d:
+                    state[payload] = d
+                    received.add(payload)
+            except queue.Empty:
+                pass
+        for p in payloads:
+            if state[p]:
+                pretty_print(state[p], payload_id=str(p))
 
 
 def parse_args():
