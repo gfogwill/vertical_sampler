@@ -42,6 +42,15 @@ _TEMP_CRITICAL_C = 55.0
 # Watchdog: reset if main loop hangs for more than this many seconds
 _WATCHDOG_TIMEOUT_S = 30
 
+# Automatic heartbeat: send a data packet every HEARTBEAT_INTERVAL_S seconds.
+# Each payload uses a fixed offset to reduce the chance of simultaneous
+# transmissions colliding on the shared LoRa channel.
+HEARTBEAT_INTERVAL_S = 60
+HEARTBEAT_OFFSETS = {
+    "matorova":   0,
+    "kenttarova": 30,
+}
+
 i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
 _rtc = rtc.RTC()
 _rtc_synced = False
@@ -332,6 +341,11 @@ def main_loop(lora, payload_id, logger):
     start_time = time.time()
     data = {}
 
+    # Heartbeat scheduler: first fire = offset, then every HEARTBEAT_INTERVAL_S.
+    # Uses time.monotonic() to avoid drift from time.time() corrections.
+    _hb_offset = HEARTBEAT_OFFSETS.get(payload_id, 0)
+    _next_heartbeat = time.monotonic() + _hb_offset
+
     while True:
         _feed_watchdog()
         led.blink(1)
@@ -348,6 +362,16 @@ def main_loop(lora, payload_id, logger):
             logger.error("Error reading data: {}".format(err))
             _failed_reading_data(lora, logger)
             continue
+
+        # Automatic heartbeat: transmit last data packet if interval elapsed.
+        now_mono = time.monotonic()
+        if now_mono >= _next_heartbeat:
+            try:
+                lora.send(pack.dict2bytes(data))
+                logger.info("Heartbeat sent")
+            except Exception as err:
+                logger.error("Heartbeat send failed: {}".format(err))
+            _next_heartbeat = now_mono + HEARTBEAT_INTERVAL_S
 
         _feed_watchdog()
         led.blink(3)
