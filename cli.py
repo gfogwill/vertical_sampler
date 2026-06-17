@@ -107,6 +107,8 @@ def pretty_print(data, payload_id=""):
 
     grouped = {g: [] for g in GROUP_ORDER}
     for key, label, unit, group in FIELDS:
+        if key.startswith("_"):
+            continue  # skip computed fields in plain output
         grouped[group].append((key, label, unit))
 
     for g_idx, group in enumerate(GROUP_ORDER):
@@ -232,20 +234,42 @@ def _enrich(data, qnh):
     return data
 
 
+def _safe_addnstr(win, row, col, text, max_cols, attr):
+    """addnstr wrapper that silently skips writes outside the terminal area.
+
+    curses raises ERR (which Python turns into an exception) when any part
+    of the write touches the last cell of the last line, or when row/col are
+    out of bounds.  We clamp aggressively so the TUI never crashes.
+    """
+    import curses
+    rows, cols = win.getmaxyx()
+    if row < 0 or row >= rows - 1:   # never write on the very last row via this helper
+        return
+    if col < 0 or col >= cols - 1:
+        return
+    avail = min(max_cols, cols - col - 1)  # leave at least 1 char margin
+    if avail <= 0:
+        return
+    try:
+        win.addnstr(row, col, text, avail, attr)
+    except curses.error:
+        pass
+
+
 def _render_column(win, data, payload_label, col_x, col_w, max_rows, qnh):
     """Draw one payload column inside window win."""
     import curses
-    row = 0
+    row = 1  # row 0 is the global header
 
     # Column header
     header = " {} ".format(payload_label.upper())
-    win.addnstr(row, col_x, header.center(col_w), col_w,
-                curses.color_pair(2) | curses.A_BOLD)
+    _safe_addnstr(win, row, col_x, header.center(col_w), col_w,
+                  curses.color_pair(2) | curses.A_BOLD)
     row += 1
 
     if not data:
-        win.addnstr(row, col_x, "  --- no data ---".ljust(col_w), col_w,
-                    curses.color_pair(3))
+        _safe_addnstr(win, row, col_x, "  --- no data ---".ljust(col_w), col_w,
+                      curses.color_pair(3))
         return
 
     last_updated = data.get("_ts")
@@ -254,7 +278,7 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows, qnh):
         ts_str = "  updated {}s ago".format(age)
     else:
         ts_str = ""
-    win.addnstr(row, col_x, ts_str.ljust(col_w), col_w, curses.color_pair(4))
+    _safe_addnstr(win, row, col_x, ts_str.ljust(col_w), col_w, curses.color_pair(4))
     row += 1
 
     grouped = {g: [] for g in GROUP_ORDER}
@@ -264,8 +288,8 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows, qnh):
     for group in GROUP_ORDER:
         if row >= max_rows:
             break
-        win.addnstr(row, col_x, "  {}".format(group).ljust(col_w), col_w,
-                    curses.color_pair(2) | curses.A_UNDERLINE)
+        _safe_addnstr(win, row, col_x, "  {}".format(group).ljust(col_w), col_w,
+                      curses.color_pair(2) | curses.A_UNDERLINE)
         row += 1
         for key, label, unit in grouped[group]:
             if row >= max_rows:
@@ -274,7 +298,7 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows, qnh):
             val_str, is_fill = _fmt_value(key, val)
             line = "    {:<18} {:>8} {}".format(label, val_str, unit)
             attr = curses.color_pair(3) if is_fill else curses.color_pair(1)
-            win.addnstr(row, col_x, line.ljust(col_w), col_w, attr)
+            _safe_addnstr(win, row, col_x, line.ljust(col_w), col_w, attr)
             row += 1
 
 
@@ -282,8 +306,8 @@ def _run_monitor(payloads, qnh, log_file):
     """curses-based TUI monitor."""
     import curses
 
-    state = {p: {} for p in payloads}   # payload -> last data dict
-    events = []                          # list of (timestamp, str)
+    state = {p: {} for p in payloads}
+    events = []
 
     def add_event(msg):
         events.append((time.time(), msg))
@@ -330,71 +354,67 @@ def _run_monitor(payloads, qnh, log_file):
         curses.curs_set(0)
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_WHITE,  -1)  # normal
-        curses.init_pair(2, curses.COLOR_CYAN,   -1)  # header / group
-        curses.init_pair(3, curses.COLOR_YELLOW, -1)  # N/A / no data
-        curses.init_pair(4, curses.COLOR_GREEN,  -1)  # timestamp
-        stdscr.timeout(200)  # non-blocking getch, 200 ms
+        curses.init_pair(1, curses.COLOR_WHITE,  -1)
+        curses.init_pair(2, curses.COLOR_CYAN,   -1)
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        curses.init_pair(4, curses.COLOR_GREEN,  -1)
+        stdscr.timeout(200)
 
-        next_poll = time.time()  # poll immediately on start
+        next_poll = time.time()
 
         while True:
-            # ---------- auto-poll ----------
             now = time.time()
             if now >= next_poll:
                 poll_all(ser)
                 next_poll = now + POLL_INTERVAL_S
 
-            # ---------- draw ----------
             stdscr.erase()
             rows, cols = stdscr.getmaxyx()
 
-            # Header bar
+            # Header
             ts_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            header = " Vertical Sampler Monitor  {}  QNH={} hPa ".format(
-                ts_now, qnh)
-            stdscr.addnstr(0, 0, header.ljust(cols), cols,
-                           curses.color_pair(2) | curses.A_REVERSE)
+            header = " Vertical Sampler Monitor  {}  QNH={} hPa ".format(ts_now, qnh)
+            _safe_addnstr(stdscr, 0, 0, header.ljust(cols - 1), cols - 1,
+                          curses.color_pair(2) | curses.A_REVERSE)
 
             # Two payload columns
             n = len(payloads)
-            col_w = (cols) // max(n, 1)
-            data_rows = rows - 4  # reserve 1 header + 1 divider + 2 events header/rows
-            events_start = rows - MAX_EVENTS - 2
-            data_rows = max(1, events_start - 2)
+            col_w = max(1, cols // max(n, 1))
+            events_start = max(3, rows - MAX_EVENTS - 2)
+            data_rows = events_start - 1
 
             for i, p in enumerate(payloads):
                 _render_column(stdscr, state[p], str(p), i * col_w, col_w,
                                data_rows, qnh)
 
-            # Divider above events
+            # Events divider
             div_row = events_start - 1
-            if 0 < div_row < rows:
-                stdscr.addnstr(div_row, 0, "─" * cols, cols,
-                               curses.color_pair(4))
+            if 0 < div_row < rows - 1:
+                _safe_addnstr(stdscr, div_row, 0,
+                              " Events ".center(cols - 1, "─"), cols - 1,
+                              curses.color_pair(4))
 
-            # Events pane
-            stdscr.addnstr(div_row, 0,
-                           " Events ".center(cols, "─"), cols,
-                           curses.color_pair(4))
+            # Events lines
             for j, (evt_ts, evt_msg) in enumerate(events[-(MAX_EVENTS):]):
-                er = div_row + 1 + j
+                er = events_start + j
                 if er >= rows - 1:
                     break
                 t_str = datetime.datetime.utcfromtimestamp(evt_ts).strftime("%H:%M:%S")
-                stdscr.addnstr(er, 0,
-                               "  {} {}".format(t_str, evt_msg).ljust(cols),
-                               cols, curses.color_pair(1))
+                _safe_addnstr(stdscr, er, 0,
+                              "  {} {}".format(t_str, evt_msg).ljust(cols - 1),
+                              cols - 1, curses.color_pair(1))
 
-            # Footer
+            # Footer (last row — use addnstr directly with A_REVERSE)
             footer = "  r=refresh  1=matorova  2=kenttarova  q=quit"
-            stdscr.addnstr(rows - 1, 0, footer.ljust(cols), cols,
-                           curses.color_pair(2) | curses.A_REVERSE)
+            try:
+                stdscr.addnstr(rows - 1, 0, footer.ljust(cols - 1), cols - 1,
+                               curses.color_pair(2) | curses.A_REVERSE)
+            except curses.error:
+                pass
 
             stdscr.noutrefresh()
             curses.doupdate()
 
-            # ---------- key input ----------
             ch = stdscr.getch()
             if ch == ord('q'):
                 break
@@ -413,7 +433,6 @@ def _run_monitor(payloads, qnh, log_file):
             import curses as _curses
             _curses.wrapper(draw, ser)
         except Exception as exc:
-            # Fallback: plain-text single poll
             print("[monitor] curses unavailable ({}), falling back to plain poll.".format(exc))
             poll_all(ser)
             for p in payloads:
@@ -425,7 +444,6 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Vertical Sampler ground control CLI")
     subparsers = parser.add_subparsers(title="subcommands", dest="subcommand", required=True)
 
-    # ---- legacy subcommands (payload-scoped) ----
     for sub_name in ("pump", "valve", "data"):
         p = subparsers.add_parser(sub_name)
         p.add_argument("payload", type=Payload, choices=list(Payload))
@@ -435,7 +453,6 @@ def parse_args():
         elif sub_name == "valve":
             p.add_argument("state", type=State, choices=list(State))
 
-    # ---- monitor ----
     mon = subparsers.add_parser("monitor", help="Live TUI dashboard")
     mon.add_argument(
         "--payloads", nargs="+", type=Payload,

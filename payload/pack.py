@@ -15,6 +15,7 @@ KEYS = [
     ("pump_front_state", "i"),
     ("pump_back_state", "i"),
     ("valve_state", "i"),
+    ("cpu_temperature", "f"),
 ]
 
 FORMAT = "<" + "".join([t for _, t in KEYS])
