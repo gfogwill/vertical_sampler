@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import time
 from enum import Enum
 import datetime
@@ -27,31 +28,40 @@ FILL_INT   = -999999
 FILL_UINT  = 4294967295
 FILL_FLOAT = -1e9
 
-# Max time a payload cycle takes (GPS read + sensors + listen window).
-# If no response arrives within this time, we retry.
-PAYLOAD_CYCLE_S  = 35   # seconds — slightly above worst-case cycle
-RETRY_INTERVAL_S = 5    # how long to wait between retries
+PAYLOAD_CYCLE_S  = 35
+RETRY_INTERVAL_S = 5
 MAX_RETRIES      = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
 
+POLL_INTERVAL_S  = 5   # monitor: seconds between automatic data polls
+
 FIELDS = [
-    # (key, label, unit, group)
     ("gps_latitude",               "Latitude",           "°",     "GPS"),
     ("gps_longitude",              "Longitude",          "°",     "GPS"),
-    ("gps_altitude",               "Altitude",           "m",     "GPS"),
+    ("gps_altitude",               "Altitude (GPS)",     "m",     "GPS"),
     ("gps_time",                   "Time (GPS)",         "UTC",   "GPS"),
     ("rh_sensor_humidity",         "Humidity",           "%RH",   "Atmosphere"),
     ("rh_sensor_temperature",      "Temperature (RH)",   "°C",    "Atmosphere"),
     ("pressure_sensor_pressure",   "Pressure",           "hPa",   "Atmosphere"),
     ("pressure_sensor_temperature", "Temperature (P)",   "°C",    "Atmosphere"),
+    ("_pressure_altitude",         "Altitude (P)",       "m",     "Atmosphere"),
     ("flow",                       "Flow",               "L/min", "Sampler"),
     ("pump_front_state",           "Pump front",         "",      "Sampler"),
     ("pump_back_state",            "Pump back",          "",      "Sampler"),
     ("valve_state",                "Valve",              "",      "Sampler"),
     ("battery_voltage",            "Battery",            "V",     "System"),
+    ("cpu_temperature",            "CPU temp",           "°C",    "System"),
     ("rssi",                       "RSSI",               "dBm",   "System"),
 ]
 
 GROUP_ORDER = ["GPS", "Atmosphere", "Sampler", "System"]
+
+
+def _pressure_altitude(pressure_hpa, qnh_hpa):
+    """ISA pressure altitude relative to QNH (metres)."""
+    try:
+        return 44330.0 * (1.0 - math.pow(pressure_hpa / qnh_hpa, 0.1903))
+    except Exception:
+        return None
 
 
 def _fmt_value(key, val):
@@ -160,8 +170,6 @@ def _read_json_line(ser, timeout_s):
                     return json.loads(text)
                 except json.JSONDecodeError:
                     pass
-            # Non-JSON line — log for debug visibility but keep waiting
-            # print("[skip] ", text)  # uncomment to debug
         else:
             time.sleep(0.05)
     return None
@@ -171,7 +179,6 @@ def relay_cmd(args):
     cmd = _build_cmd(args)
 
     with find_serial() as ser:
-        # Flush any boot messages or stale data before sending
         time.sleep(0.2)
         ser.reset_input_buffer()
 
@@ -197,22 +204,265 @@ def relay_cmd(args):
         ))
 
 
+# ---------------------------------------------------------------------------
+# Monitor TUI
+# ---------------------------------------------------------------------------
+
+MAX_EVENTS = 8
+
+_PAYLOADS_ALL = [Payload.MATOROVA, Payload.KENTTAROVA]
+
+
+def _poll_payload(ser, payload, timeout_s=6):
+    """Send a 'data' request and return the parsed dict or None."""
+    cmd = "{} data\n".format(payload).encode()
+    ser.reset_input_buffer()
+    ser.write(cmd)
+    ser.flush()
+    return _read_json_line(ser, timeout_s=timeout_s)
+
+
+def _enrich(data, qnh):
+    """Add computed pressure altitude in-place."""
+    p = data.get("pressure_sensor_pressure")
+    if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
+        data["_pressure_altitude"] = _pressure_altitude(p, qnh)
+    else:
+        data["_pressure_altitude"] = None
+    return data
+
+
+def _render_column(win, data, payload_label, col_x, col_w, max_rows, qnh):
+    """Draw one payload column inside window win."""
+    import curses
+    row = 0
+
+    # Column header
+    header = " {} ".format(payload_label.upper())
+    win.addnstr(row, col_x, header.center(col_w), col_w,
+                curses.color_pair(2) | curses.A_BOLD)
+    row += 1
+
+    if not data:
+        win.addnstr(row, col_x, "  --- no data ---".ljust(col_w), col_w,
+                    curses.color_pair(3))
+        return
+
+    last_updated = data.get("_ts")
+    if last_updated:
+        age = int(time.time() - last_updated)
+        ts_str = "  updated {}s ago".format(age)
+    else:
+        ts_str = ""
+    win.addnstr(row, col_x, ts_str.ljust(col_w), col_w, curses.color_pair(4))
+    row += 1
+
+    grouped = {g: [] for g in GROUP_ORDER}
+    for key, label, unit, group in FIELDS:
+        grouped[group].append((key, label, unit))
+
+    for group in GROUP_ORDER:
+        if row >= max_rows:
+            break
+        win.addnstr(row, col_x, "  {}".format(group).ljust(col_w), col_w,
+                    curses.color_pair(2) | curses.A_UNDERLINE)
+        row += 1
+        for key, label, unit in grouped[group]:
+            if row >= max_rows:
+                break
+            val = data.get(key)
+            val_str, is_fill = _fmt_value(key, val)
+            line = "    {:<18} {:>8} {}".format(label, val_str, unit)
+            attr = curses.color_pair(3) if is_fill else curses.color_pair(1)
+            win.addnstr(row, col_x, line.ljust(col_w), col_w, attr)
+            row += 1
+
+
+def _run_monitor(payloads, qnh, log_file):
+    """curses-based TUI monitor."""
+    import curses
+
+    state = {p: {} for p in payloads}   # payload -> last data dict
+    events = []                          # list of (timestamp, str)
+
+    def add_event(msg):
+        events.append((time.time(), msg))
+        if len(events) > MAX_EVENTS:
+            events.pop(0)
+
+    def poll_all(ser):
+        for p in payloads:
+            add_event("Polling {}...".format(p))
+            d = _poll_payload(ser, p)
+            if d is not None:
+                d["_ts"] = time.time()
+                _enrich(d, qnh)
+                state[p] = d
+                if log_file:
+                    try:
+                        with open(log_file, "a") as f:
+                            f.write(json.dumps(d) + "\n")
+                    except Exception as e:
+                        add_event("Log error: {}".format(e))
+                add_event("{} OK — P={} hPa".format(
+                    p, d.get("pressure_sensor_pressure", "N/A")))
+            else:
+                add_event("{} — no response".format(p))
+
+    def poll_one(ser, p):
+        add_event("Polling {}...".format(p))
+        d = _poll_payload(ser, p)
+        if d is not None:
+            d["_ts"] = time.time()
+            _enrich(d, qnh)
+            state[p] = d
+            if log_file:
+                try:
+                    with open(log_file, "a") as f:
+                        f.write(json.dumps(d) + "\n")
+                except Exception as e:
+                    add_event("Log error: {}".format(e))
+            add_event("{} OK".format(p))
+        else:
+            add_event("{} — no response".format(p))
+
+    def draw(stdscr, ser):
+        curses.curs_set(0)
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_WHITE,  -1)  # normal
+        curses.init_pair(2, curses.COLOR_CYAN,   -1)  # header / group
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)  # N/A / no data
+        curses.init_pair(4, curses.COLOR_GREEN,  -1)  # timestamp
+        stdscr.timeout(200)  # non-blocking getch, 200 ms
+
+        next_poll = time.time()  # poll immediately on start
+
+        while True:
+            # ---------- auto-poll ----------
+            now = time.time()
+            if now >= next_poll:
+                poll_all(ser)
+                next_poll = now + POLL_INTERVAL_S
+
+            # ---------- draw ----------
+            stdscr.erase()
+            rows, cols = stdscr.getmaxyx()
+
+            # Header bar
+            ts_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            header = " Vertical Sampler Monitor  {}  QNH={} hPa ".format(
+                ts_now, qnh)
+            stdscr.addnstr(0, 0, header.ljust(cols), cols,
+                           curses.color_pair(2) | curses.A_REVERSE)
+
+            # Two payload columns
+            n = len(payloads)
+            col_w = (cols) // max(n, 1)
+            data_rows = rows - 4  # reserve 1 header + 1 divider + 2 events header/rows
+            events_start = rows - MAX_EVENTS - 2
+            data_rows = max(1, events_start - 2)
+
+            for i, p in enumerate(payloads):
+                _render_column(stdscr, state[p], str(p), i * col_w, col_w,
+                               data_rows, qnh)
+
+            # Divider above events
+            div_row = events_start - 1
+            if 0 < div_row < rows:
+                stdscr.addnstr(div_row, 0, "─" * cols, cols,
+                               curses.color_pair(4))
+
+            # Events pane
+            stdscr.addnstr(div_row, 0,
+                           " Events ".center(cols, "─"), cols,
+                           curses.color_pair(4))
+            for j, (evt_ts, evt_msg) in enumerate(events[-(MAX_EVENTS):]):
+                er = div_row + 1 + j
+                if er >= rows - 1:
+                    break
+                t_str = datetime.datetime.utcfromtimestamp(evt_ts).strftime("%H:%M:%S")
+                stdscr.addnstr(er, 0,
+                               "  {} {}".format(t_str, evt_msg).ljust(cols),
+                               cols, curses.color_pair(1))
+
+            # Footer
+            footer = "  r=refresh  1=matorova  2=kenttarova  q=quit"
+            stdscr.addnstr(rows - 1, 0, footer.ljust(cols), cols,
+                           curses.color_pair(2) | curses.A_REVERSE)
+
+            stdscr.noutrefresh()
+            curses.doupdate()
+
+            # ---------- key input ----------
+            ch = stdscr.getch()
+            if ch == ord('q'):
+                break
+            elif ch == ord('r'):
+                poll_all(ser)
+                next_poll = time.time() + POLL_INTERVAL_S
+            elif ch == ord('1') and len(payloads) >= 1:
+                poll_one(ser, payloads[0])
+            elif ch == ord('2') and len(payloads) >= 2:
+                poll_one(ser, payloads[1])
+
+    with find_serial() as ser:
+        time.sleep(0.2)
+        ser.reset_input_buffer()
+        try:
+            import curses as _curses
+            _curses.wrapper(draw, ser)
+        except Exception as exc:
+            # Fallback: plain-text single poll
+            print("[monitor] curses unavailable ({}), falling back to plain poll.".format(exc))
+            poll_all(ser)
+            for p in payloads:
+                if state[p]:
+                    pretty_print(state[p], payload_id=str(p))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Vertical Sampler ground control CLI")
-    parser.add_argument("payload", type=Payload, choices=list(Payload))
     subparsers = parser.add_subparsers(title="subcommands", dest="subcommand", required=True)
 
-    pump = subparsers.add_parser("pump", help="Control pump")
-    pump.add_argument("pump_location", type=str, choices=["front", "back", "both"])
-    pump.add_argument("state", type=State, choices=list(State))
+    # ---- legacy subcommands (payload-scoped) ----
+    for sub_name in ("pump", "valve", "data"):
+        p = subparsers.add_parser(sub_name)
+        p.add_argument("payload", type=Payload, choices=list(Payload))
+        if sub_name == "pump":
+            p.add_argument("pump_location", type=str, choices=["front", "back", "both"])
+            p.add_argument("state", type=State, choices=list(State))
+        elif sub_name == "valve":
+            p.add_argument("state", type=State, choices=list(State))
 
-    valve = subparsers.add_parser("valve", help="Control electrovalve")
-    valve.add_argument("state", type=State, choices=list(State))
-
-    subparsers.add_parser("data", help="Request telemetry data")
+    # ---- monitor ----
+    mon = subparsers.add_parser("monitor", help="Live TUI dashboard")
+    mon.add_argument(
+        "--payloads", nargs="+", type=Payload,
+        choices=list(Payload), default=_PAYLOADS_ALL,
+        metavar="PAYLOAD",
+        help="Payloads to monitor (default: both)"
+    )
+    mon.add_argument(
+        "--qnh", type=float, default=1013.25,
+        help="QNH altimeter setting in hPa (default: 1013.25 ISA)"
+    )
+    mon.add_argument(
+        "--log-file", dest="log_file", default=None,
+        metavar="FILE",
+        help="Append received data records as JSONL to FILE"
+    )
 
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    relay_cmd(parse_args())
+    args = parse_args()
+    if args.subcommand == "monitor":
+        _run_monitor(
+            payloads=args.payloads,
+            qnh=args.qnh,
+            log_file=args.log_file,
+        )
+    else:
+        relay_cmd(args)
