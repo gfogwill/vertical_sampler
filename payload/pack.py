@@ -37,7 +37,6 @@ def dict2bytes(d: dict) -> bytes:
             else:
                 b = val.encode() if isinstance(val, str) else bytes(val)
                 b = b[:_STR_LEN]
-                # CircuitPython has no bytes.ljust — pad manually
                 if len(b) < _STR_LEN:
                     b = b + b"\x00" * (_STR_LEN - len(b))
                 tup.append(b)
@@ -57,7 +56,11 @@ def bytes2dict(b) -> dict:
     result = {}
     for (k, fmt), v in zip(KEYS, tup):
         if fmt == "10s":
-            result[k] = v.rstrip(b"\x00").decode(errors="ignore").strip()
+            # CircuitPython bytes.decode() has no 'errors' kwarg
+            try:
+                result[k] = v.rstrip(b"\x00").decode()
+            except Exception:
+                result[k] = ""
         else:
             result[k] = v
     return result
