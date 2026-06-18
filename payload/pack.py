@@ -21,10 +21,10 @@ KEYS = [
 
 FORMAT = "<" + "".join([t for _, t in KEYS])
 
-INT_FILLVAL      = -999999
+INT_FILLVAL          = -999999
 UNSIGNED_INT_FILLVAL = 4294967295
-FLOAT_FILLVAL    = -1e9
-_STR_FILLVAL     = b"\x00" * 10
+FLOAT_FILLVAL        = -1e9
+_STR_LEN             = 10
 
 
 def dict2bytes(d: dict) -> bytes:
@@ -33,10 +33,14 @@ def dict2bytes(d: dict) -> bytes:
         val = d.get(key)
         if fmt == "10s":
             if val is None:
-                tup.append(_STR_FILLVAL)
+                tup.append(b"\x00" * _STR_LEN)
             else:
                 b = val.encode() if isinstance(val, str) else bytes(val)
-                tup.append(b[:10].ljust(10, b"\x00"))
+                b = b[:_STR_LEN]
+                # CircuitPython has no bytes.ljust — pad manually
+                if len(b) < _STR_LEN:
+                    b = b + b"\x00" * (_STR_LEN - len(b))
+                tup.append(b)
         elif val is None:
             tup.append(
                 UNSIGNED_INT_FILLVAL if fmt == "L" else
