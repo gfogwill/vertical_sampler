@@ -5,7 +5,7 @@ Firmware and ground station software for a balloon-borne vertical air sampler fo
 ## System Overview
 
 ```
-┌─────────────────────────┐        LoRa 868 MHz        ┌─────────────────────────┐
+┌─────────────────────────┐        LoRa 868 MHz         ┌─────────────────────────┐
 │        PAYLOAD          │◄───────────────────────────►│    GROUND STATION       │
 │  Raspberry Pi Pico W    │                             │  Raspberry Pi Pico W    │
 │                         │                             │                         │
