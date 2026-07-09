@@ -10,7 +10,6 @@ import led
 import pack
 import address
 from lora import LoRa
-from datetime import datetime
 
 BOARD_GP_LORA_SCK = board.GP2
 BOARD_GP_LORA_TX  = board.GP3
@@ -58,40 +57,10 @@ def _process_command(cmd_str):
         try:
             d = pack.bytes2dict(msg)
             print(json.dumps(d))
-            _maybe_dump_packet(d)
         except Exception:
             print(msg.decode(errors="ignore").strip())
     elif msg is None:
         print('{"error": "no response"}')
-
-
-# Dump CLI flag: --dump <ruta>. If not pasado, usar "ground_dump.jsonl".
-#
-# Se parsea sys.argv para permitir: python main.py --dump /ruta/a/archivo
-# Si no se pasa, se usa ground_dump.jsonl
-dump_path = "ground_dump.jsonl"
-for i, a in enumerate(sys.argv):
-    if a == "--dump" and i + 1 < len(sys.argv):
-        dump_path = sys.argv[i + 1]
-
-
-def _maybe_dump_packet(decoded_dict):
-    """Append a JSONL line with pc_time, payload and data when packet is from known payloads."""
-    try:
-        payload_name = decoded_dict.get("payload_id") or decoded_dict.get("payload")
-        if payload_name not in ("matorova", "kenttarova"):
-            return
-        entry = {
-            "pc_time": datetime.now().isoformat(),
-            "payload": payload_name,
-            "data": decoded_dict,
-        }
-        # Open/append/close on each write to tolerate power cuts.
-        with open(dump_path, "a") as fh:
-            fh.write(json.dumps(entry) + "\n")
-    except Exception:
-        # Never raise from dump to avoid changing CLI behavior.
-        pass
 
 
 while True:
@@ -115,6 +84,5 @@ while True:
             try:
                 d = pack.bytes2dict(msg)
                 print(json.dumps(d))
-                _maybe_dump_packet(d)
             except Exception:
                 pass  # ignore non-pack bytes (e.g. stray text frames)
