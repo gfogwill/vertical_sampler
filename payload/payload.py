@@ -230,18 +230,28 @@ class GPS:
         return None, None, None, None
 
 
-def _check_safety(pump, bat_v, logger):
-    """Check CPU temperature and battery. Cut pump if critical."""
+def _check_safety(pump, valve, bat_v, logger):
+    """Check CPU temperature and battery. Cut pump and valve if critical."""
     cpu_temp = microcontroller.cpu.temperature
+
+    # Temperatura CPU
     if cpu_temp >= _TEMP_CRITICAL_C:
-        logger.error("CPU temp critical: {:.1f}C — cutting pump".format(cpu_temp))
+        logger.error(
+            "CPU temp critical: {:.1f}C — cutting pump & valve".format(cpu_temp)
+        )
         pump.emergency_off()
+        valve.set_state("off")
     elif cpu_temp >= _TEMP_WARN_C:
         logger.warning("CPU temp warning: {:.1f}C".format(cpu_temp))
+
+    # Batería
     if bat_v > 1.0:
         if bat_v <= _BAT_CUTOFF_V:
-            logger.error("Battery critical: {:.2f}V — cutting pump".format(bat_v))
+            logger.error(
+                "Battery critical: {:.2f}V — cutting pump & valve".format(bat_v)
+            )
             pump.emergency_off()
+            valve.set_state("off")
         elif bat_v <= _BAT_WARN_V:
             logger.warning("Battery low: {:.2f}V".format(bat_v))
 
@@ -354,7 +364,7 @@ def main_loop(lora, payload_id, logger):
             data = _collect_data(
                 payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time
             )
-            _check_safety(pump, data["battery_voltage"], logger)
+           _check_safety(pump, valve, data["battery_voltage"], logger)
             led.blink(2)
             logger.data(data)
             logger.info("Sensor data collected")
