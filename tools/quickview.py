@@ -129,11 +129,12 @@ class QuickView:
         self._volume_l = {p: 0.0 for p in PAYLOADS}
         self._last_flow = {p: None for p in PAYLOADS}
         self._last_flow_time = {p: None for p in PAYLOADS}
-
+        self._anchor = {p: None for p in PAYLOADS}
+        
         self._build_figure()
         self.read_all_existing_lines()
         
-        self._anchor = {p: None for p in PAYLOADS}
+        
 
     # ------------------------------------------------------------------
     # Figura y ejes
