@@ -119,8 +119,9 @@ class QuickView:
         self.palette = apply_theme(theme)
         self.file_pos = 0
 
-        self.timestamps = defaultdict(lambda: deque(maxlen=max_points))
-        self.series = defaultdict(lambda: defaultdict(lambda: deque(maxlen=max_points)))
+        # Guardamos todo el historial del archivo (deques sin maxlen)
+        self.timestamps = defaultdict(lambda: deque())
+        self.series = defaultdict(lambda: defaultdict(lambda: deque()))
         self.last = {p: {} for p in PAYLOADS}
         self.last_seen_wall = {p: None for p in PAYLOADS}
 
