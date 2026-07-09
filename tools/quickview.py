@@ -11,14 +11,12 @@ Supported JSON line formats:
  - {...} with "payload_id" inside                              (flat, cli.py format)
 
 Panels (top to bottom, shared local-time X axis):
-  0. Actuator strip   -> status lights (green=ON, red=OFF, gray=no data)
-  1. Battery (V)      -> with warning/cutoff reference lines
-  2. Temperatures (C) -> CPU / pressure sensor / RH, per payload
-  3. Pressure (hPa)
-  4. Altitude (m)      -> GPS (solid) vs pressure-derived via QNH (dashed)
-  5. Relative humidity (%)
-  6. Flow (L/min, left axis) + cumulative sampled volume (L, right axis)
-  7. RSSI (dBm)        -> LoRa link quality
+  0. Battery (V)      -> with warning/cutoff reference lines
+  1. Temperatures (C) -> CPU / pressure sensor / RH, per payload
+  2. Pressure (hPa)
+  3. Altitude (m)      -> GPS (solid) vs pressure-derived via QNH (dashed)
+  4. Relative humidity (%)
+  5. Flow (L/min, left axis) + cumulative sampled volume (L, right axis)
 """
 
 import argparse
@@ -50,12 +48,6 @@ TEMP_CRITICAL_C = 55.0
 
 MIN_VALID_YEAR = 2024          # minimum year to trust rtc_time (factory default is 2020)
 MAX_ANCHOR_GAP_S = 6 * 3600    # discard reconstructed timestamps drifting further than this
-
-ACTUATORS = [
-    ("pump_front_state", "PUMP F"),
-    ("pump_back_state", "PUMP B"),
-    ("valve_state", "VALVE"),
-]
 
 
 def parse_args():
@@ -136,27 +128,25 @@ class QuickView:
             pass
 
         gs = gridspec.GridSpec(
-            8, 1, figure=self.fig,
-            height_ratios=[0.45, 1, 1, 0.85, 1, 0.85, 1.05, 0.9],
+            7, 1, figure=self.fig,
+            height_ratios=[1, 1, 0.85, 1, 0.85, 1.05, 0.9],
             hspace=0.28,
             left=0.075, right=0.965, top=0.94, bottom=0.06,
         )
 
-        self.ax_actuators = self.fig.add_subplot(gs[0])
-        self.ax_batt = self.fig.add_subplot(gs[1])
-        self.ax_temp = self.fig.add_subplot(gs[2], sharex=self.ax_batt)
-        self.ax_press = self.fig.add_subplot(gs[3], sharex=self.ax_batt)
-        self.ax_alt = self.fig.add_subplot(gs[4], sharex=self.ax_batt)
-        self.ax_hum = self.fig.add_subplot(gs[5], sharex=self.ax_batt)
-        self.ax_flow = self.fig.add_subplot(gs[6], sharex=self.ax_batt)
-        self.ax_rssi = self.fig.add_subplot(gs[7], sharex=self.ax_batt)
+        self.ax_batt = self.fig.add_subplot(gs[0])
+        self.ax_temp = self.fig.add_subplot(gs[1], sharex=self.ax_batt)
+        self.ax_press = self.fig.add_subplot(gs[2], sharex=self.ax_batt)
+        self.ax_alt = self.fig.add_subplot(gs[3], sharex=self.ax_batt)
+        self.ax_hum = self.fig.add_subplot(gs[4], sharex=self.ax_batt)
+        self.ax_flow = self.fig.add_subplot(gs[5], sharex=self.ax_batt)
 
         self.time_axes = [self.ax_batt, self.ax_temp, self.ax_press,
-                           self.ax_alt, self.ax_hum, self.ax_flow, self.ax_rssi]
+                           self.ax_alt, self.ax_hum, self.ax_flow]
 
         self.ax_vol = self.ax_flow.twinx()
 
-        for ax in self.time_axes + [self.ax_actuators]:
+        for ax in self.time_axes:
             ax.set_facecolor(pal["panel"])
             for spine in ax.spines.values():
                 spine.set_color(pal["grid"])
@@ -186,39 +176,6 @@ class QuickView:
         make(self.ax_hum, "rh_sensor_humidity")
         make(self.ax_flow, "flow")
         make(self.ax_vol, "volume_l", linestyle="--", alpha=0.9)
-        make(self.ax_rssi, "rssi")
-
-        # -- actuator strip: "status light" dots --
-        self.actuator_dots = {}
-        n_act = len(ACTUATORS)
-        n_pay = len(PAYLOADS)
-        self.ax_actuators.set_xlim(0, 1)
-        self.ax_actuators.set_ylim(0, 1)
-        self.ax_actuators.axis("off")
-
-        col_w = 1.0 / (n_act + 1)
-        row_h = 1.0 / (n_pay + 0.6)
-        for pi, payload in enumerate(PAYLOADS):
-            y = 1.0 - (pi + 0.75) * row_h
-            self.ax_actuators.text(
-                0.01, y, payload, fontsize=12, fontweight="bold",
-                color=PAYLOAD_COLORS[payload], va="center", ha="left",
-                fontfamily="monospace", transform=self.ax_actuators.transAxes,
-            )
-            for ai, (key, label) in enumerate(ACTUATORS):
-                x = col_w * (ai + 1.15)
-                dot = self.ax_actuators.scatter(
-                    [x], [y], s=260, color=self.palette["off"],
-                    edgecolors=self.palette["text"], linewidths=0.8, zorder=3,
-                    transform=self.ax_actuators.transAxes,
-                )
-                self.actuator_dots[(payload, key)] = dot
-                if pi == 0:
-                    self.ax_actuators.text(
-                        x, 1.0 - 0.12, label, fontsize=9.5, color=self.palette["text_muted"],
-                        va="center", ha="center", fontfamily="monospace",
-                        transform=self.ax_actuators.transAxes,
-                    )
 
     def _style_axes(self):
         pal = self.palette
@@ -233,28 +190,21 @@ class QuickView:
         self.ax_temp.axhline(TEMP_WARN_C, color=pal["warn"], linestyle=":", linewidth=1.0, alpha=0.7)
         self.ax_temp.axhline(TEMP_CRITICAL_C, color=pal["crit"], linestyle=":", linewidth=1.0, alpha=0.8)
 
-        # compact ylabels instead of full-width titles -> saves vertical space
+        # compact ylabels to save vertical space
         ylabels = [
-            (self.ax_batt, "BATTERY\n(V)"),
-            (self.ax_temp, "TEMP\n(C)"),
-            (self.ax_press, "PRESSURE\n(hPa)"),
-            (self.ax_alt, "ALTITUDE\n(m)"),
-            (self.ax_hum, "HUMIDITY\n(%)"),
-            (self.ax_flow, "FLOW\n(L/min)"),
-            (self.ax_rssi, "RSSI\n(dBm)"),
+            (self.ax_batt, "BATTERY\\n(V)"),
+            (self.ax_temp, "TEMP\\n(C)"),
+            (self.ax_press, "PRESSURE\\n(hPa)"),
+            (self.ax_alt, "ALTITUDE\\n(m)"),
+            (self.ax_hum, "HUMIDITY\\n(%)"),
+            (self.ax_flow, "FLOW\\n(L/min)"),
         ]
         for ax, label in ylabels:
             ax.set_ylabel(label, fontsize=9, color=pal["text_muted"],
                            fontfamily="monospace", rotation=0, ha="right", va="center", labelpad=14)
 
-        self.ax_vol.set_ylabel("VOL\n(L)", fontsize=9, color=pal["text_muted"],
+        self.ax_vol.set_ylabel("VOL\\n(L)", fontsize=9, color=pal["text_muted"],
                                 fontfamily="monospace", rotation=0, ha="left", va="center", labelpad=14)
-
-        self.ax_actuators.text(
-            0.0, 1.18, "ACTUATORS", fontsize=10.5, fontweight="bold",
-            color=pal["text"], fontfamily="monospace",
-            transform=self.ax_actuators.transAxes,
-        )
 
         # small legend markers inside each panel corner instead of a text-heavy title
         self.ax_temp.text(0.995, 0.94, "solid=CPU  dash=press  dot=RH", transform=self.ax_temp.transAxes,
@@ -276,14 +226,6 @@ class QuickView:
 
         for ax in self.time_axes[:-1]:
             ax.tick_params(labelbottom=False)
-
-        self.ax_rssi.set_xlabel("local time", fontsize=10, color=pal["text"], fontfamily="monospace")
-        self.date_formatter = mdates.DateFormatter("%H:%M:%S")
-        self.ax_rssi.xaxis.set_major_formatter(self.date_formatter)
-        for lbl in self.ax_rssi.get_xticklabels():
-            lbl.set_rotation(25)
-            lbl.set_ha("right")
-            lbl.set_fontfamily("monospace")
 
         # single global legend (payload colors)
         legend_handles = [
@@ -434,22 +376,6 @@ class QuickView:
         self.lines[ax_key][payload].set_data(xs, ys)
         return xs
 
-    def _update_actuator_lights(self):
-        pal = self.palette
-        now = datetime.now().astimezone()
-        for payload in PAYLOADS:
-            last = self.last.get(payload, {})
-            last_seen = self.last_seen_wall.get(payload)
-            stale = (last_seen is None) or ((now - last_seen).total_seconds() > self.stale_after)
-            for key, _label in ACTUATORS:
-                dot = self.actuator_dots[(payload, key)]
-                if stale:
-                    color = pal["off"]
-                else:
-                    val = last.get(key)
-                    color = pal["ok"] if val == 1 else (pal["crit"] if val == 0 else pal["off"])
-                dot.set_color(color)
-
     def update_plot(self, _frame):
         self.update_from_lines()
 
@@ -460,7 +386,7 @@ class QuickView:
                 all_xnums.extend(xs)
             for key in ("cpu_temperature", "pressure_sensor_temperature", "rh_sensor_temperature",
                         "pressure_sensor_pressure", "gps_altitude", "baro_altitude",
-                        "rh_sensor_humidity", "flow", "volume_l", "rssi"):
+                        "rh_sensor_humidity", "flow", "volume_l"):
                 self._set_line_data(key, payload)
 
         if all_xnums:
@@ -472,12 +398,9 @@ class QuickView:
             ax.relim()
             ax.autoscale_view(scalex=False)
 
-        self._update_actuator_lights()
-
         artists = []
         for m in self.lines.values():
             artists.extend(m.values())
-        artists.extend(self.actuator_dots.values())
         return artists
 
     def run(self, interval_ms=1000):
