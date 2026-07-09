@@ -24,7 +24,7 @@ Paneles (de arriba a abajo, eje X = tiempo local compartido):
 import argparse
 import json
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -131,8 +131,9 @@ class QuickView:
         self._last_flow_time = {p: None for p in PAYLOADS}
 
         self._build_figure()
-        # Cargar TODO el historico del archivo al iniciar
         self.read_all_existing_lines()
+        
+        self._anchor = {p: None for p in PAYLOADS}
 
     # ------------------------------------------------------------------
     # Figura y ejes
@@ -319,6 +320,8 @@ class QuickView:
                         continue
 
                     dt_local = self.timestamp_for_entry(entry, d)
+                    if dt_local is None:
+                        continue  # sin referencia de tiempo confiable todavia, se descarta
                     self.timestamps[payload].append(dt_local)
                     self.last_seen_wall[payload] = datetime.now().astimezone()
 
@@ -371,28 +374,43 @@ class QuickView:
         return None, None
 
     def timestamp_for_entry(self, entry, d):
-        rtc_str = d.get("rtc_time") if isinstance(d, dict) else None
-        if rtc_str:
-            try:
-                dt = datetime.fromisoformat(rtc_str)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                if dt.year >= MIN_VALID_YEAR:
+            """Devuelve datetime real o None si no se puede determinar con confianza."""
+            rtc_str = d.get("rtc_time") if isinstance(d, dict) else None
+            gps_time = d.get("gps_time") if isinstance(d, dict) else None
+            payload = d.get("payload_id") if isinstance(d, dict) else entry.get("payload")
+    
+            if rtc_str:
+                try:
+                    dt = datetime.fromisoformat(rtc_str)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if dt.year >= MIN_VALID_YEAR:
+                        dt_local = dt.astimezone()
+                        if payload in PAYLOADS and gps_time is not None:
+                            self._anchor[payload] = (gps_time, dt_local)
+                        return dt_local
+                except Exception:
+                    pass
+    
+            pc_time = entry.get("pc_time") if isinstance(entry, dict) else None
+            if pc_time:
+                try:
+                    dt = datetime.fromisoformat(pc_time)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
                     return dt.astimezone()
-            except Exception:
-                pass
-
-        pc_time = entry.get("pc_time") if isinstance(entry, dict) else None
-        if pc_time:
-            try:
-                dt = datetime.fromisoformat(pc_time)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone()
-            except Exception:
-                pass
-
-        return datetime.now().astimezone()
+                except Exception:
+                    pass
+    
+            # RTC invalido y sin pc_time: reconstruir usando el ancla + gps_time
+            if payload in PAYLOADS and gps_time is not None and self._anchor[payload] is not None:
+                anchor_gps, anchor_dt = self._anchor[payload]
+                delta_s = gps_time - anchor_gps
+                if abs(delta_s) < 6 * 3600:  # descarta anclas muy viejas/absurdas
+                    return anchor_dt + timedelta(seconds=delta_s)
+    
+            # sin ancla todavia (antes del primer fix real): no graficar este punto
+            return None
 
     def update_from_lines(self):
         now_wall = datetime.now().astimezone()
@@ -409,6 +427,8 @@ class QuickView:
                 continue
 
             dt_local = self.timestamp_for_entry(entry, d)
+            if dt_local is None:
+                continue  # sin referencia de tiempo confiable todavia, se descarta
             self.timestamps[payload].append(dt_local)
             self.last_seen_wall[payload] = now_wall
 
