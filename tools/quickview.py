@@ -9,17 +9,19 @@ Soporta dos formatos de línea JSON:
  - {"pc_time": "...", "payload": "matorova", "data": {...}}
  - {...}  (diccionario directo emitido por cli.py, con campo payload_id)
 
-Muestra 2 filas (una por payload) y varias columnas (una por métrica + status).
+Muestra subplots apilados (uno por métrica), todos compartiendo el eje X (tiempo local).
+Cada subplot contiene una línea por payload (matorova y kenttarova).
 """
 
 import argparse
 import json
 import time
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timezone
 
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.dates as mdates
 
 # Métricas a mostrar (puedes ajustar)
 METRICS = [
@@ -30,7 +32,7 @@ METRICS = [
     "gps_altitude",
 ]
 
-PAYLOADS = ["matorova", "kenttarova"]  # orden visual: arriba -> abajo
+PAYLOADS = ["matorova", "kenttarova"]  # orden visual
 
 
 def parse_args():
@@ -51,45 +53,35 @@ class QuickView:
 
         # datos: payload -> metric -> deque
         self.data = defaultdict(lambda: defaultdict(lambda: deque(maxlen=self.max_points)))
-        # timestamps por payload (en segundos relativos)
+        # timestamps por payload (datetime objects in local timezone)
         self.timestamps = defaultdict(lambda: deque(maxlen=self.max_points))
-        self.first_ts = {}  # payload -> timestamp base (float)
 
-        # line handles: payload -> metric -> Line2D
+        # line handles: metric -> payload -> Line2D
         self.lines = defaultdict(dict)
-        # last status dictionary
+        # last values for possible title/status
         self.last = {p: {} for p in PAYLOADS}
 
-        # figure layout: filas = len(PAYLOADS), columnas = len(METRICS) + 1 (status)
-        nrows = len(PAYLOADS)
-        ncols = len(METRICS) + 1
-        figsize = (3 * ncols, 2.5 * nrows)
-        self.fig, axes_grid = plt.subplots(nrows, ncols, figsize=figsize, sharex="col")
-
-        # Ensure axes_grid is 2D
+        # figure: one column, one row per metric
+        nrows = len(METRICS)
+        figsize = (12, 2.2 * nrows)
+        self.fig, axes = plt.subplots(nrows, 1, figsize=figsize, sharex=True)
         if nrows == 1:
-            axes_grid = [axes_grid]
-        if ncols == 1:
-            axes_grid = [[ax] for ax in axes_grid]
-
-        self.axes = axes_grid
+            axes = [axes]
+        self.axes = axes
 
         # prepare axes and lines
-        for r, payload in enumerate(PAYLOADS):
-            for c, metric in enumerate(METRICS):
-                ax = self.axes[r][c]
-                ax.set_ylabel(metric)
-                ax.set_title(f"{payload} — {metric}")
+        for ax, metric in zip(self.axes, METRICS):
+            ax.set_ylabel(metric)
+            for payload in PAYLOADS:
                 (line,) = ax.plot([], [], label=payload)
-                self.lines[payload][metric] = line
-                ax.grid(True)
+                self.lines[metric][payload] = line
+            ax.grid(True)
+            ax.legend(loc="upper left", fontsize=8)
 
-            # status axis (last column)
-            st_ax = self.axes[r][len(METRICS)]
-            st_ax.axis("off")  # we'll draw text manually
-
-        # x-label for bottom axes
-        self.axes[-1][0].set_xlabel("segundos desde inicio (payload)")
+        # x-axis formatting: local time
+        self.axes[-1].set_xlabel("hora local")
+        self.date_formatter = mdates.DateFormatter('%H:%M:%S')
+        self.axes[-1].xaxis.set_major_formatter(self.date_formatter)
         plt.tight_layout()
 
     def read_new_lines(self):
@@ -116,31 +108,51 @@ class QuickView:
         pid = entry.get("payload_id") or entry.get("payload_id".lower())
         if pid:
             return pid, entry
-        # A veces el CLI puede not set payload_id; try to detect by fields (not reliable)
         return None, None
 
+    def parse_rtc_time_local(self, rtc_time_str):
+        """Parse rtc_time ISO string and return a timezone-aware datetime in local timezone."""
+        try:
+            dt = datetime.fromisoformat(rtc_time_str)
+        except Exception:
+            return None
+        # If no tzinfo, assume UTC (RTC is synced to UTC per README)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone()  # convert to local timezone
+
     def timestamp_for_entry(self, entry, d):
-        """Devuelve timestamp flotante (segundos epoch) para el registro;
-        prioridades: entry.pc_time -> d._ts -> ahora"""
-        # Wrapped pc_time:
-        pc_time = None
-        if isinstance(entry, dict) and "pc_time" in entry:
+        """Return a datetime object in local timezone for the entry.
+        Priority: d['rtc_time'] (GPS/RTC) -> entry['pc_time'] -> d['_ts'] -> now
+        """
+        # Prefer RTC time from payload data when available (ISO string)
+        if isinstance(d, dict) and d.get("rtc_time"):
+            dt = self.parse_rtc_time_local(d.get("rtc_time"))
+            if dt:
+                return dt
+        # Wrapped pc_time
+        if isinstance(entry, dict) and entry.get("pc_time"):
             try:
-                # Try parsing ISO; fallback to epoch on failure
-                pc_time = datetime.fromisoformat(entry["pc_time"]).timestamp()
+                dt = datetime.fromisoformat(entry["pc_time"])
             except Exception:
                 try:
-                    pc_time = float(entry["pc_time"])
+                    ts = float(entry["pc_time"])
+                    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
                 except Exception:
-                    pc_time = None
-        if pc_time is not None:
-            return pc_time
-        # enriched _ts
-        ts = d.get("_ts")
-        if ts is not None:
-            return float(ts)
-        # gps_time can be relative; don't use it here as epoch
-        return time.time()
+                    dt = None
+            if dt is not None:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone()
+        # enriched _ts (epoch seconds) provided by CLI
+        if isinstance(d, dict) and d.get("_ts") is not None:
+            try:
+                ts = float(d.get("_ts"))
+                return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+            except Exception:
+                pass
+        # fallback: now local
+        return datetime.now().astimezone()
 
     def update_from_lines(self):
         for raw in self.read_new_lines():
@@ -154,101 +166,80 @@ class QuickView:
             payload, d = self.extract_payload_and_data(entry)
             if payload not in PAYLOADS or d is None:
                 continue
-            # timestamp epoch seconds
-            t_epoch = self.timestamp_for_entry(entry, d)
-            # set first_ts for payload (base)
-            if payload not in self.first_ts:
-                self.first_ts[payload] = t_epoch
-            t_rel = t_epoch - self.first_ts[payload]
-            self.timestamps[payload].append(t_rel)
 
-            # store metrics
+            dt_local = self.timestamp_for_entry(entry, d)
+            # append timestamp
+            self.timestamps[payload].append(dt_local)
+
             for metric in METRICS:
                 val = d.get(metric)
-                # convert None -> nan to keep arrays consistent
                 if val is None:
                     val = float("nan")
                 self.data[payload][metric].append(val)
 
-            # store last values for status
-            self.last[payload] = {
-                "battery_voltage": d.get("battery_voltage"),
-                "rssi": d.get("rssi"),
-                "pump_front_state": d.get("pump_front_state"),
-                "pump_back_state": d.get("pump_back_state"),
-                "valve_state": d.get("valve_state"),
-                "_ts": t_epoch,
-            }
-
-    def draw_status(self, row_idx, payload):
-        st_ax = self.axes[row_idx][len(METRICS)]
-        st_ax.clear()
-        st_ax.axis("off")
-        last = self.last.get(payload, {})
-        lines = []
-        bv = last.get("battery_voltage")
-        if bv is not None:
-            try:
-                lines.append(f"Battery: {bv:.2f} V")
-            except Exception:
-                lines.append(f"Battery: {bv}")
-        else:
-            lines.append("Battery: N/A")
-        rssi = last.get("rssi")
-        lines.append(f"RSSI: {rssi if rssi is not None else 'N/A'}")
-        pf = last.get("pump_front_state")
-        pb = last.get("pump_back_state")
-        vl = last.get("valve_state")
-        lines.append(f"Pump front: {'ON' if pf else 'OFF'}")
-        lines.append(f"Pump back: {'ON' if pb else 'OFF'}")
-        lines.append(f"Valve: {'ON' if vl else 'OFF'}")
-        ts = last.get("_ts")
-        if ts:
-            lines.append("Last: " + datetime.utcfromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S UTC"))
-        # Draw text centered
-        txt = "\n".join(lines)
-        st_ax.text(0.5, 0.5, txt, ha="center", va="center", fontsize=9, family="monospace")
-        return st_ax
+            # keep last values for possible title
+            self.last[payload] = d
 
     def update_plot(self, frame):
-        # ingest new lines
         self.update_from_lines()
 
-        # update lines for each payload/metric
-        for r, payload in enumerate(PAYLOADS):
-            xs = list(self.timestamps[payload])
-            for metric in METRICS:
+        # Update each metric axis with lines for both payloads
+        for ax, metric in zip(self.axes, METRICS):
+            # collect combined x-range
+            all_dates = []
+            for payload in PAYLOADS:
+                xs = list(self.timestamps[payload])
                 ys = list(self.data[payload][metric])
-                line = self.lines[payload].get(metric)
-                if line is not None:
-                    line.set_data(xs, ys)
-                    ax = self.axes[r][METRICS.index(metric)]
-                    ax.relim()
-                    ax.autoscale_view()
+                # convert datetimes to matplotlib float dates
+                if xs:
+                    xnums = mdates.date2num(xs)
+                else:
+                    xnums = []
+                line = self.lines[metric][payload]
+                line.set_data(xnums, ys)
+                all_dates.extend(xnums)
 
-            # update status axis
-            self.draw_status(r, payload)
+            if all_dates:
+                xmin = min(all_dates)
+                xmax = max(all_dates)
+                # set xlim with small margin
+                span = max(1 / 86400.0, xmax - xmin)  # at least one second
+                ax.set_xlim(xmin - 0.001, xmax + 0.001 + span * 0.01)
+            ax.relim()
+            ax.autoscale_view(scalex=False)
 
-        # set x-limits globally to max range across payloads (nice to sync)
-        all_x = []
+        # format x axis on bottom subplot
+        self.axes[-1].xaxis_date()
+        self.axes[-1].xaxis.set_major_formatter(self.date_formatter)
+        for lbl in self.axes[-1].get_xticklabels():
+            lbl.set_rotation(30)
+            lbl.set_ha("right")
+
+        # update figure title or per-payload short titles
+        # set suptitle with last timestamps per payload
+        titles = []
         for p in PAYLOADS:
-            all_x.extend(self.timestamps[p])
-        if all_x:
-            xmin = min(all_x)
-            xmax = max(all_x)
-            # give a small margin
-            dx = max(1.0, xmax - xmin)
-            for r in range(len(PAYLOADS)):
-                for c in range(len(METRICS)):
+            last = self.last.get(p, {})
+            ts = None
+            if isinstance(last, dict):
+                if last.get("rtc_time"):
                     try:
-                        self.axes[r][c].set_xlim(max(0, xmax - max(self.max_points, dx)), xmax + 0.5)
+                        ts = self.parse_rtc_time_local(last.get("rtc_time"))
                     except Exception:
-                        pass
+                        ts = None
+            if ts is None:
+                if self.timestamps[p]:
+                    ts = self.timestamps[p][-1]
+            if ts:
+                titles.append(f"{p}: {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                titles.append(p)
+        self.fig.suptitle("  |  ".join(titles))
 
-        # return artists updated
+        # return artists
         artists = []
-        for payload in PAYLOADS:
-            artists.extend(self.lines[payload].values())
+        for metric in METRICS:
+            artists.extend(self.lines[metric].values())
         return artists
 
     def run(self, interval_ms=1000):
