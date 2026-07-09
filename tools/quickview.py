@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-QuickView: terminal de control en vivo para los backups JSONL de cli.py --log-file.
+QuickView: live ground control dashboard for JSONL backups written by cli.py --log-file.
 
-Uso:
+Usage:
     python tools/quickview.py --log-file ground_dump.jsonl
     python tools/quickview.py -f ground_dump.jsonl --qnh 1015.7 --max-points 600
 
-Formatos de linea JSON soportados:
- - {"pc_time": "...", "payload": "matorova", "data": {...}}   (envuelto)
- - {...}  con "payload_id" adentro                             (plano, formato cli.py)
+Supported JSON line formats:
+ - {"pc_time": "...", "payload": "matorova", "data": {...}}   (wrapped)
+ - {...} with "payload_id" inside                              (flat, cli.py format)
 
-Paneles (de arriba a abajo, eje X = tiempo local compartido):
-  0. Franja de actuadores  -> luces testigo (verde=ON, rojo=OFF, gris=sin dato)
-  1. Bateria (V)           -> con lineas de warning/cutoff
-  2. Temperaturas (C)      -> CPU / sensor de presion / RH, por payload
-  3. Presion (hPa)
-  4. Altitud (m)           -> GPS (solido) vs derivada de presion via QNH (punteado)
-  5. Humedad relativa (%)
-  6. Flujo (L/min, eje izq) + Volumen muestreado acumulado (L, eje der, curva suave)
-  7. RSSI (dBm)            -> calidad de enlace LoRa
+Panels (top to bottom, shared local-time X axis):
+  0. Actuator strip   -> status lights (green=ON, red=OFF, gray=no data)
+  1. Battery (V)      -> with warning/cutoff reference lines
+  2. Temperatures (C) -> CPU / pressure sensor / RH, per payload
+  3. Pressure (hPa)
+  4. Altitude (m)      -> GPS (solid) vs pressure-derived via QNH (dashed)
+  5. Relative humidity (%)
+  6. Flow (L/min, left axis) + cumulative sampled volume (L, right axis)
+  7. RSSI (dBm)        -> LoRa link quality
 """
 
 import argparse
@@ -33,14 +33,14 @@ import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 
 # ---------------------------------------------------------------------------
-# Configuracion general
+# General configuration
 # ---------------------------------------------------------------------------
 PAYLOADS = ["matorova", "kenttarova"]
 
-# Paleta "instrumento de vuelo": cian y ambar sobre fondo casi negro
+# "Flight instrument" palette: cyan and amber on near-black background
 PAYLOAD_COLORS = {
-    "matorova": "#39C8E8",     # cian
-    "kenttarova": "#F5A623",   # ambar
+    "matorova": "#39C8E8",     # cyan
+    "kenttarova": "#F5A623",   # amber
 }
 
 BAT_WARN_V = 19.8
@@ -48,7 +48,8 @@ BAT_CUTOFF_V = 18.6
 TEMP_WARN_C = 45.0
 TEMP_CRITICAL_C = 55.0
 
-MIN_VALID_YEAR = 2024          # anio minimo para considerar rtc_time real (no default de fabrica)
+MIN_VALID_YEAR = 2024          # minimum year to trust rtc_time (factory default is 2020)
+MAX_ANCHOR_GAP_S = 6 * 3600    # discard reconstructed timestamps drifting further than this
 
 ACTUATORS = [
     ("pump_front_state", "PUMP F"),
@@ -58,19 +59,19 @@ ACTUATORS = [
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="QuickView: terminal de control en vivo para vertical_sampler")
+    p = argparse.ArgumentParser(description="QuickView: live ground control terminal for vertical_sampler")
     p.add_argument("--log-file", "-f", default="ground_dump.jsonl",
-                   help="Archivo JSONL escrito por cli.py --log-file")
-    p.add_argument("--max-points", type=int, default=300,
-                   help="Puntos maximos por payload en la ventana deslizante")
+                   help="JSONL file written by cli.py --log-file")
+    p.add_argument("--max-points", type=int, default=0,
+                   help="Max points per payload kept in memory (0 = unlimited, full history)")
     p.add_argument("--interval-ms", type=int, default=1000,
-                   help="Intervalo de refresco (ms)")
+                   help="Refresh interval (ms)")
     p.add_argument("--qnh", type=float, default=1013.25,
-                   help="QNH del dia (hPa) para derivar altitud desde presion")
+                   help="Today's QNH (hPa), used to derive altitude from pressure")
     p.add_argument("--theme", choices=["dark", "light"], default="dark",
-                   help="Tema visual del dashboard")
+                   help="Dashboard visual theme")
     p.add_argument("--stale-after", type=float, default=90.0,
-                   help="Segundos sin datos para marcar un payload/actuador como sin dato")
+                   help="Seconds without data before a payload/actuator is marked stale")
     return p.parse_args()
 
 
@@ -78,33 +79,20 @@ def apply_theme(theme):
     if theme == "dark":
         plt.style.use("dark_background")
         return {
-            "bg": "#0a0e14",
-            "panel": "#0f141c",
-            "grid": "#22303c",
-            "text": "#d7e2ea",
-            "text_muted": "#7c8b96",
-            "ok": "#3ddc84",
-            "warn": "#f5c518",
-            "crit": "#ff5c5c",
-            "off": "#3a4550",
+            "bg": "#0a0e14", "panel": "#0f141c", "grid": "#22303c",
+            "text": "#d7e2ea", "text_muted": "#7c8b96",
+            "ok": "#3ddc84", "warn": "#f5c518", "crit": "#ff5c5c", "off": "#3a4550",
         }
-    else:
-        plt.style.use("default")
-        return {
-            "bg": "#f4f6f8",
-            "panel": "#ffffff",
-            "grid": "#c9d2d8",
-            "text": "#1b232a",
-            "text_muted": "#5a6570",
-            "ok": "#2e9e5b",
-            "warn": "#b8860b",
-            "crit": "#c62828",
-            "off": "#a9b3ba",
-        }
+    plt.style.use("default")
+    return {
+        "bg": "#f4f6f8", "panel": "#ffffff", "grid": "#c9d2d8",
+        "text": "#1b232a", "text_muted": "#5a6570",
+        "ok": "#2e9e5b", "warn": "#b8860b", "crit": "#c62828", "off": "#a9b3ba",
+    }
 
 
 def baro_altitude_m(pressure_hpa, qnh_hpa):
-    """Altitud ISA estandar (m) a partir de presion y QNH de referencia."""
+    """Standard ISA altitude (m) from pressure and reference QNH."""
     if pressure_hpa is None or pressure_hpa <= 0 or qnh_hpa is None or qnh_hpa <= 0:
         return float("nan")
     return 44330.77 * (1.0 - (pressure_hpa / qnh_hpa) ** 0.1902632)
@@ -113,35 +101,35 @@ def baro_altitude_m(pressure_hpa, qnh_hpa):
 class QuickView:
     def __init__(self, log_file, max_points, stale_after, theme, qnh):
         self.log_file = log_file
-        self.max_points = max_points
+        self.max_points = max_points if max_points > 0 else None
         self.stale_after = stale_after
         self.qnh = qnh
         self.palette = apply_theme(theme)
         self.file_pos = 0
 
-        # Guardamos todo el historial del archivo (deques sin maxlen)
-        self.timestamps = defaultdict(lambda: deque())
-        self.series = defaultdict(lambda: defaultdict(lambda: deque()))
+        maker = (lambda: deque(maxlen=self.max_points)) if self.max_points else (lambda: deque())
+        self.timestamps = defaultdict(maker)
+        self.series = defaultdict(lambda: defaultdict(maker))
         self.last = {p: {} for p in PAYLOADS}
         self.last_seen_wall = {p: None for p in PAYLOADS}
 
-        # volumen acumulado (litros), integracion trapezoidal continua (no se recorta con max_points)
+        # cumulative sampled volume (L), continuous trapezoidal integration (never trimmed)
         self._volume_l = {p: 0.0 for p in PAYLOADS}
         self._last_flow = {p: None for p in PAYLOADS}
         self._last_flow_time = {p: None for p in PAYLOADS}
+
+        # time anchor per payload: (gps_time_at_anchor, real_datetime_at_anchor)
         self._anchor = {p: None for p in PAYLOADS}
-        
+
         self._build_figure()
         self.read_all_existing_lines()
-        
-        
 
     # ------------------------------------------------------------------
-    # Figura y ejes
+    # Figure and axes
     # ------------------------------------------------------------------
     def _build_figure(self):
         pal = self.palette
-        self.fig = plt.figure(figsize=(19, 15), facecolor=pal["bg"])
+        self.fig = plt.figure(figsize=(19, 13.5), facecolor=pal["bg"])
         try:
             self.fig.canvas.manager.set_window_title("QuickView - vertical_sampler")
         except Exception:
@@ -149,9 +137,9 @@ class QuickView:
 
         gs = gridspec.GridSpec(
             8, 1, figure=self.fig,
-            height_ratios=[0.55, 1, 1, 0.85, 1, 0.85, 1.1, 0.9],
-            hspace=0.65,
-            left=0.07, right=0.965, top=0.93, bottom=0.07,
+            height_ratios=[0.45, 1, 1, 0.85, 1, 0.85, 1.05, 0.9],
+            hspace=0.28,
+            left=0.075, right=0.965, top=0.94, bottom=0.06,
         )
 
         self.ax_actuators = self.fig.add_subplot(gs[0])
@@ -200,9 +188,8 @@ class QuickView:
         make(self.ax_vol, "volume_l", linestyle="--", alpha=0.9)
         make(self.ax_rssi, "rssi")
 
-        # -- franja de actuadores: circulos "luz testigo" --
+        # -- actuator strip: "status light" dots --
         self.actuator_dots = {}
-        self.actuator_labels_drawn = False
         n_act = len(ACTUATORS)
         n_pay = len(PAYLOADS)
         self.ax_actuators.set_xlim(0, 1)
@@ -238,44 +225,59 @@ class QuickView:
 
         self.ax_batt.axhline(BAT_WARN_V, color=pal["warn"], linestyle=":", linewidth=1.1, alpha=0.8)
         self.ax_batt.axhline(BAT_CUTOFF_V, color=pal["crit"], linestyle=":", linewidth=1.1, alpha=0.9)
-        self.ax_batt.text(0.005, 0.04, f"cutoff {BAT_CUTOFF_V}V", transform=self.ax_batt.transAxes,
+        self.ax_batt.text(0.005, 0.06, f"cutoff {BAT_CUTOFF_V}V", transform=self.ax_batt.transAxes,
                            fontsize=8.5, color=pal["crit"], fontfamily="monospace")
-        self.ax_batt.text(0.005, 0.16, f"warn {BAT_WARN_V}V", transform=self.ax_batt.transAxes,
+        self.ax_batt.text(0.005, 0.18, f"warn {BAT_WARN_V}V", transform=self.ax_batt.transAxes,
                            fontsize=8.5, color=pal["warn"], fontfamily="monospace")
 
         self.ax_temp.axhline(TEMP_WARN_C, color=pal["warn"], linestyle=":", linewidth=1.0, alpha=0.7)
         self.ax_temp.axhline(TEMP_CRITICAL_C, color=pal["crit"], linestyle=":", linewidth=1.0, alpha=0.8)
 
-        titles = [
-            (self.ax_batt, "BATERIA (V)"),
-            (self.ax_temp, "TEMPERATURAS (C)  solido=CPU  guion=presion  punteado=RH"),
-            (self.ax_press, "PRESION (hPa)"),
-            (self.ax_alt, f"ALTITUD (m)  solido=GPS  guion=baro (QNH={self.qnh:.1f} hPa)"),
-            (self.ax_hum, "HUMEDAD RELATIVA (%)"),
-            (self.ax_flow, "FLUJO (L/min, eje izq)  +  VOLUMEN ACUMULADO (L, guion, eje der)"),
-            (self.ax_rssi, "RSSI (dBm)"),
+        # compact ylabels instead of full-width titles -> saves vertical space
+        ylabels = [
+            (self.ax_batt, "BATTERY\n(V)"),
+            (self.ax_temp, "TEMP\n(C)"),
+            (self.ax_press, "PRESSURE\n(hPa)"),
+            (self.ax_alt, "ALTITUDE\n(m)"),
+            (self.ax_hum, "HUMIDITY\n(%)"),
+            (self.ax_flow, "FLOW\n(L/min)"),
+            (self.ax_rssi, "RSSI\n(dBm)"),
         ]
-        for ax, title in titles:
-            ax.set_title(title, loc="left", fontsize=10, color=pal["text_muted"],
-                          fontfamily="monospace", pad=4)
+        for ax, label in ylabels:
+            ax.set_ylabel(label, fontsize=9, color=pal["text_muted"],
+                           fontfamily="monospace", rotation=0, ha="right", va="center", labelpad=14)
 
-        self.ax_actuators.set_title("ACTUADORES", loc="left", fontsize=10.5, fontweight="bold",
-                                     color=pal["text"], fontfamily="monospace", pad=2)
+        self.ax_vol.set_ylabel("VOL\n(L)", fontsize=9, color=pal["text_muted"],
+                                fontfamily="monospace", rotation=0, ha="left", va="center", labelpad=14)
+
+        self.ax_actuators.text(
+            0.0, 1.18, "ACTUATORS", fontsize=10.5, fontweight="bold",
+            color=pal["text"], fontfamily="monospace",
+            transform=self.ax_actuators.transAxes,
+        )
+
+        # small legend markers inside each panel corner instead of a text-heavy title
+        self.ax_temp.text(0.995, 0.94, "solid=CPU  dash=press  dot=RH", transform=self.ax_temp.transAxes,
+                           fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
+        self.ax_alt.text(0.995, 0.94, "solid=GPS  dash=baro", transform=self.ax_alt.transAxes,
+                          fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
+        self.ax_flow.text(0.995, 0.94, f"QNH={self.qnh:.1f}hPa  dash=cum.vol", transform=self.ax_flow.transAxes,
+                           fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
 
         for ax in self.time_axes:
             ax.grid(True, alpha=0.35, color=pal["grid"], linewidth=0.7)
-            ax.tick_params(axis="both", labelsize=9.5, colors=pal["text"])
+            ax.tick_params(axis="both", labelsize=9, colors=pal["text"])
             for lbl in ax.get_yticklabels():
                 lbl.set_fontfamily("monospace")
 
-        self.ax_vol.tick_params(axis="y", labelsize=9.5, colors=pal["text_muted"])
+        self.ax_vol.tick_params(axis="y", labelsize=9, colors=pal["text_muted"])
         for lbl in self.ax_vol.get_yticklabels():
             lbl.set_fontfamily("monospace")
 
         for ax in self.time_axes[:-1]:
             ax.tick_params(labelbottom=False)
 
-        self.ax_rssi.set_xlabel("hora local", fontsize=10.5, color=pal["text"], fontfamily="monospace")
+        self.ax_rssi.set_xlabel("local time", fontsize=10, color=pal["text"], fontfamily="monospace")
         self.date_formatter = mdates.DateFormatter("%H:%M:%S")
         self.ax_rssi.xaxis.set_major_formatter(self.date_formatter)
         for lbl in self.ax_rssi.get_xticklabels():
@@ -283,75 +285,29 @@ class QuickView:
             lbl.set_ha("right")
             lbl.set_fontfamily("monospace")
 
-        # leyenda global unica (colores por payload)
+        # single global legend (payload colors)
         legend_handles = [
             Line2D([0], [0], color=PAYLOAD_COLORS[p], linewidth=3, label=p.upper())
             for p in PAYLOADS
         ]
         self.fig.legend(
-            handles=legend_handles, loc="upper right", fontsize=11.5, framealpha=0.25,
-            ncols=2, bbox_to_anchor=(0.965, 0.975), prop={"family": "monospace", "weight": "bold"},
-        )
-
-        self.fig.suptitle(
-            "QUICKVIEW  //  VERTICAL_SAMPLER  //  GROUND CONTROL",
-            fontsize=17, fontweight="bold", color=pal["text"],
-            fontfamily="monospace", y=0.985, x=0.07, ha="left",
+            handles=legend_handles, loc="upper right", fontsize=11, framealpha=0.25,
+            ncols=2, bbox_to_anchor=(0.965, 0.985), prop={"family": "monospace", "weight": "bold"},
         )
 
     # ------------------------------------------------------------------
-    # Lectura y parseo del log
+    # Log reading and parsing
     # ------------------------------------------------------------------
     def read_all_existing_lines(self):
-        """Lee TODAS las líneas del archivo al iniciar."""
+        """Load the entire existing history from the file on startup."""
         try:
             with open(self.log_file, "r") as f:
                 lines = f.readlines()
                 self.file_pos = f.tell()
-                for raw in lines:
-                    raw = raw.strip()
-                    if not raw:
-                        continue
-                    try:
-                        entry = json.loads(raw)
-                    except Exception:
-                        continue
-                    payload, d = self.extract_payload_and_data(entry)
-                    if payload not in PAYLOADS or d is None:
-                        continue
-
-                    dt_local = self.timestamp_for_entry(entry, d)
-                    if dt_local is None:
-                        continue  # sin referencia de tiempo confiable todavia, se descarta
-                    self.timestamps[payload].append(dt_local)
-                    self.last_seen_wall[payload] = datetime.now().astimezone()
-
-                    for key in ("battery_voltage", "cpu_temperature", "pressure_sensor_temperature",
-                                "rh_sensor_temperature", "pressure_sensor_pressure", "gps_altitude",
-                                "rh_sensor_humidity", "flow", "rssi",
-                                "pump_front_state", "pump_back_state", "valve_state"):
-                        val = d.get(key)
-                        self.series[key][payload].append(val if val is not None else float("nan"))
-
-                    baro_alt = baro_altitude_m(d.get("pressure_sensor_pressure"), self.qnh)
-                    self.series["baro_altitude"][payload].append(baro_alt)
-
-                    # integracion trapezoidal continua de flujo -> volumen (L)
-                    flow = d.get("flow")
-                    if flow is not None:
-                        prev_flow = self._last_flow[payload]
-                        prev_t = self._last_flow_time[payload]
-                        if prev_flow is not None and prev_t is not None:
-                            dt_min = (dt_local - prev_t).total_seconds() / 60.0
-                            if 0 < dt_min < 30:  # ignora huecos gigantes (payload caida, etc.)
-                                self._volume_l[payload] += 0.5 * (flow + prev_flow) * dt_min
-                        self._last_flow[payload] = flow
-                        self._last_flow_time[payload] = dt_local
-                    self.series["volume_l"][payload].append(self._volume_l[payload])
-
-                    self.last[payload] = d
         except FileNotFoundError:
-            pass
+            return
+        for raw in lines:
+            self._ingest_line(raw)
 
     def read_new_lines(self):
         try:
@@ -374,89 +330,100 @@ class QuickView:
             return pid, entry
         return None, None
 
-    def timestamp_for_entry(self, entry, d):
-            """Devuelve datetime real o None si no se puede determinar con confianza."""
-            rtc_str = d.get("rtc_time") if isinstance(d, dict) else None
-            gps_time = d.get("gps_time") if isinstance(d, dict) else None
-            payload = d.get("payload_id") if isinstance(d, dict) else entry.get("payload")
-    
-            if rtc_str:
-                try:
-                    dt = datetime.fromisoformat(rtc_str)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    if dt.year >= MIN_VALID_YEAR:
-                        dt_local = dt.astimezone()
-                        if payload in PAYLOADS and gps_time is not None:
-                            self._anchor[payload] = (gps_time, dt_local)
-                        return dt_local
-                except Exception:
-                    pass
-    
-            pc_time = entry.get("pc_time") if isinstance(entry, dict) else None
-            if pc_time:
-                try:
-                    dt = datetime.fromisoformat(pc_time)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    return dt.astimezone()
-                except Exception:
-                    pass
-    
-            # RTC invalido y sin pc_time: reconstruir usando el ancla + gps_time
-            if payload in PAYLOADS and gps_time is not None and self._anchor[payload] is not None:
-                anchor_gps, anchor_dt = self._anchor[payload]
+    def timestamp_for_entry(self, entry, d, payload):
+        """Return a real local datetime for this sample.
+
+        Priority: valid rtc_time -> wrapped pc_time -> anchor + gps_time delta
+        -> bootstrap a new anchor at "now" (degraded mode, e.g. GPS never got
+        a fix during this session) so data is never silently dropped.
+        """
+        rtc_str = d.get("rtc_time") if isinstance(d, dict) else None
+        gps_time = d.get("gps_time") if isinstance(d, dict) else None
+
+        if rtc_str:
+            try:
+                dt = datetime.fromisoformat(rtc_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt.year >= MIN_VALID_YEAR:
+                    dt_local = dt.astimezone()
+                    if payload in PAYLOADS and gps_time is not None:
+                        self._anchor[payload] = (gps_time, dt_local)
+                    return dt_local
+            except Exception:
+                pass
+
+        pc_time = entry.get("pc_time") if isinstance(entry, dict) else None
+        if pc_time:
+            try:
+                dt = datetime.fromisoformat(pc_time)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone()
+            except Exception:
+                pass
+
+        if payload in PAYLOADS and gps_time is not None:
+            anchor = self._anchor[payload]
+            if anchor is not None:
+                anchor_gps, anchor_dt = anchor
                 delta_s = gps_time - anchor_gps
-                if abs(delta_s) < 6 * 3600:  # descarta anclas muy viejas/absurdas
+                if abs(delta_s) < MAX_ANCHOR_GAP_S:
                     return anchor_dt + timedelta(seconds=delta_s)
-    
-            # sin ancla todavia (antes del primer fix real): no graficar este punto
-            return None
+            # no anchor yet at all (RTC never synced this session): bootstrap
+            # one at "now" so the point is still plotted, using relative
+            # gps_time spacing for everything that follows.
+            now_local = datetime.now().astimezone()
+            self._anchor[payload] = (gps_time, now_local)
+            return now_local
+
+        # no rtc_time, no pc_time, no gps_time at all: last resort
+        return datetime.now().astimezone()
+
+    def _ingest_line(self, raw):
+        raw = raw.strip()
+        if not raw:
+            return
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            return
+        payload, d = self.extract_payload_and_data(entry)
+        if payload not in PAYLOADS or d is None:
+            return
+
+        dt_local = self.timestamp_for_entry(entry, d, payload)
+        self.timestamps[payload].append(dt_local)
+        self.last_seen_wall[payload] = datetime.now().astimezone()
+
+        for key in ("battery_voltage", "cpu_temperature", "pressure_sensor_temperature",
+                    "rh_sensor_temperature", "pressure_sensor_pressure", "gps_altitude",
+                    "rh_sensor_humidity", "flow", "rssi",
+                    "pump_front_state", "pump_back_state", "valve_state"):
+            val = d.get(key)
+            self.series[key][payload].append(val if val is not None else float("nan"))
+
+        baro_alt = baro_altitude_m(d.get("pressure_sensor_pressure"), self.qnh)
+        self.series["baro_altitude"][payload].append(baro_alt)
+
+        # continuous trapezoidal integration of flow -> volume (L)
+        flow = d.get("flow")
+        if flow is not None:
+            prev_flow = self._last_flow[payload]
+            prev_t = self._last_flow_time[payload]
+            if prev_flow is not None and prev_t is not None:
+                dt_min = (dt_local - prev_t).total_seconds() / 60.0
+                if 0 < dt_min < 30:  # ignore huge gaps (payload dropout, restart, etc.)
+                    self._volume_l[payload] += 0.5 * (flow + prev_flow) * dt_min
+            self._last_flow[payload] = flow
+            self._last_flow_time[payload] = dt_local
+        self.series["volume_l"][payload].append(self._volume_l[payload])
+
+        self.last[payload] = d
 
     def update_from_lines(self):
-        now_wall = datetime.now().astimezone()
         for raw in self.read_new_lines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                entry = json.loads(raw)
-            except Exception:
-                continue
-            payload, d = self.extract_payload_and_data(entry)
-            if payload not in PAYLOADS or d is None:
-                continue
-
-            dt_local = self.timestamp_for_entry(entry, d)
-            if dt_local is None:
-                continue  # sin referencia de tiempo confiable todavia, se descarta
-            self.timestamps[payload].append(dt_local)
-            self.last_seen_wall[payload] = now_wall
-
-            for key in ("battery_voltage", "cpu_temperature", "pressure_sensor_temperature",
-                        "rh_sensor_temperature", "pressure_sensor_pressure", "gps_altitude",
-                        "rh_sensor_humidity", "flow", "rssi",
-                        "pump_front_state", "pump_back_state", "valve_state"):
-                val = d.get(key)
-                self.series[key][payload].append(val if val is not None else float("nan"))
-
-            baro_alt = baro_altitude_m(d.get("pressure_sensor_pressure"), self.qnh)
-            self.series["baro_altitude"][payload].append(baro_alt)
-
-            # integracion trapezoidal continua de flujo -> volumen (L)
-            flow = d.get("flow")
-            if flow is not None:
-                prev_flow = self._last_flow[payload]
-                prev_t = self._last_flow_time[payload]
-                if prev_flow is not None and prev_t is not None:
-                    dt_min = (dt_local - prev_t).total_seconds() / 60.0
-                    if 0 < dt_min < 30:  # ignora huecos gigantes (payload caida, etc.)
-                        self._volume_l[payload] += 0.5 * (flow + prev_flow) * dt_min
-                self._last_flow[payload] = flow
-                self._last_flow_time[payload] = dt_local
-            self.series["volume_l"][payload].append(self._volume_l[payload])
-
-            self.last[payload] = d
+            self._ingest_line(raw)
 
     # ------------------------------------------------------------------
     # Render
