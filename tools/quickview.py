@@ -130,6 +130,8 @@ class QuickView:
         self._last_flow_time = {p: None for p in PAYLOADS}
 
         self._build_figure()
+        # Cargar TODO el historico del archivo al iniciar
+        self.read_all_existing_lines()
 
     # ------------------------------------------------------------------
     # Figura y ejes
@@ -297,6 +299,55 @@ class QuickView:
     # ------------------------------------------------------------------
     # Lectura y parseo del log
     # ------------------------------------------------------------------
+    def read_all_existing_lines(self):
+        """Lee TODAS las líneas del archivo al iniciar."""
+        try:
+            with open(self.log_file, "r") as f:
+                lines = f.readlines()
+                self.file_pos = f.tell()
+                for raw in lines:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        entry = json.loads(raw)
+                    except Exception:
+                        continue
+                    payload, d = self.extract_payload_and_data(entry)
+                    if payload not in PAYLOADS or d is None:
+                        continue
+
+                    dt_local = self.timestamp_for_entry(entry, d)
+                    self.timestamps[payload].append(dt_local)
+                    self.last_seen_wall[payload] = datetime.now().astimezone()
+
+                    for key in ("battery_voltage", "cpu_temperature", "pressure_sensor_temperature",
+                                "rh_sensor_temperature", "pressure_sensor_pressure", "gps_altitude",
+                                "rh_sensor_humidity", "flow", "rssi",
+                                "pump_front_state", "pump_back_state", "valve_state"):
+                        val = d.get(key)
+                        self.series[key][payload].append(val if val is not None else float("nan"))
+
+                    baro_alt = baro_altitude_m(d.get("pressure_sensor_pressure"), self.qnh)
+                    self.series["baro_altitude"][payload].append(baro_alt)
+
+                    # integracion trapezoidal continua de flujo -> volumen (L)
+                    flow = d.get("flow")
+                    if flow is not None:
+                        prev_flow = self._last_flow[payload]
+                        prev_t = self._last_flow_time[payload]
+                        if prev_flow is not None and prev_t is not None:
+                            dt_min = (dt_local - prev_t).total_seconds() / 60.0
+                            if 0 < dt_min < 30:  # ignora huecos gigantes (payload caida, etc.)
+                                self._volume_l[payload] += 0.5 * (flow + prev_flow) * dt_min
+                        self._last_flow[payload] = flow
+                        self._last_flow_time[payload] = dt_local
+                    self.series["volume_l"][payload].append(self._volume_l[payload])
+
+                    self.last[payload] = d
+        except FileNotFoundError:
+            pass
+
     def read_new_lines(self):
         try:
             with open(self.log_file, "r") as f:
