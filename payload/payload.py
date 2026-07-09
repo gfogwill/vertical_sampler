@@ -364,7 +364,7 @@ def main_loop(lora, payload_id, logger):
             data = _collect_data(
                 payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time
             )
-           _check_safety(pump, valve, data["battery_voltage"], logger)
+            _check_safety(pump, valve, data["battery_voltage"], logger)
             led.blink(2)
             logger.data(data)
             logger.info("Sensor data collected")
