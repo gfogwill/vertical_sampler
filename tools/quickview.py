@@ -127,9 +127,10 @@ class QuickView:
         except Exception:
             pass
 
+        # Adjusted to 6 rows to match the panels actually created
         gs = gridspec.GridSpec(
-            7, 1, figure=self.fig,
-            height_ratios=[1, 1, 0.85, 1, 0.85, 1.05, 0.9],
+            6, 1, figure=self.fig,
+            height_ratios=[1, 1, 0.85, 1, 0.85, 1.05],
             hspace=0.28,
             left=0.075, right=0.965, top=0.94, bottom=0.06,
         )
@@ -224,8 +225,16 @@ class QuickView:
         for lbl in self.ax_vol.get_yticklabels():
             lbl.set_fontfamily("monospace")
 
+        # hide x labels on all but the bottom (flow) axis and set a proper time formatter
         for ax in self.time_axes[:-1]:
             ax.tick_params(labelbottom=False)
+
+        self.date_formatter = mdates.DateFormatter("%H:%M:%S")
+        self.ax_flow.xaxis.set_major_formatter(self.date_formatter)
+        for lbl in self.ax_flow.get_xticklabels():
+            lbl.set_rotation(25)
+            lbl.set_ha("right")
+            lbl.set_fontfamily("monospace")
 
         # single global legend (payload colors)
         legend_handles = [
