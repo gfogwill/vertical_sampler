@@ -2,6 +2,7 @@ import adafruit_rfm9x
 import board
 import busio
 import digitalio
+import time
 
 BOARD_GP_LORA_CS = board.GP5
 BOARD_GP_LORA_RESET = board.GP14
@@ -34,3 +35,23 @@ class LoRa:
 
     def set_destination(self, destination):
         self.rfm9x.destination = destination
+
+    def reset_radio(self):
+        """Hardware-reset the RFM9x via the RESET pin.
+
+        Call this after an SPI error or unexpected silence to bring the
+        module back to a known-good state.  Follows the SX1276 datasheet
+        POR sequence: assert reset low for >= 100 us, then release and
+        wait >= 5 ms for the internal oscillator to settle.
+
+        Safe to call at any time; does NOT re-initialise the SPI bus or
+        re-create the RFM9x object, so the existing spi/cs references
+        remain valid.
+        """
+        try:
+            self.reset.switch_to_output(value=False)  # assert RESET
+            time.sleep(0.0002)                         # 200 us (> 100 us min)
+            self.reset.value = True                    # release RESET
+            time.sleep(0.010)                          # 10 ms settling (> 5 ms min)
+        except Exception:
+            pass  # best-effort; caller will detect failure on next send/receive
