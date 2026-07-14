@@ -18,10 +18,12 @@ BOARD_GP_LORA_RX  = board.GP4
 
 spi = busio.SPI(BOARD_GP_LORA_SCK, MOSI=BOARD_GP_LORA_TX, MISO=BOARD_GP_LORA_RX)
 
+# Default destination = ground itself so the LoRa object is always valid.
+# set_destination() overrides this before every send.
 lora = LoRa(
     spi=spi,
     node=address.ground_rfm_address,
-    destination=None,
+    destination=address.ground_rfm_address,
 )
 
 POLL = select.poll()
@@ -82,18 +84,27 @@ def _process_command(cmd_str):
 
         d = _parse_packet(msg)
         if d is None:
-            # Ignore stray/corrupt/non-pack frames instead of treating them as command replies
+            # Ignore stray/corrupt/non-pack frames
             continue
 
-        # If payload implements msg_type, only command acknowledgements satisfy the command.
-        # Backward compatibility: if msg_type is absent, accept the first valid telemetry dict.
-        msg_type = d.get("msg_type")
-        if msg_type in (None, "command_ack"):
+        msg_type = d.get("msg_type", "")
+
+        # Use pack constants so these strings stay in sync with the wire format.
+        if msg_type == pack.MSG_COMMAND_ACK:
             ack = d
             break
-        elif msg_type == "telemetry":
-            # Telemetry arrived while waiting for command ack; ignore it here.
+        elif msg_type == pack.MSG_COMMAND_ERROR:
+            ack = d
+            break
+        elif msg_type == pack.MSG_TELEMETRY:
+            # Heartbeat arrived while waiting for ACK; ignore.
             continue
+        elif not msg_type:
+            # Backward compat: old firmware without msg_type field.
+            # Accept as ACK only if the struct parsed cleanly.
+            ack = d
+            break
+        # Unknown msg_type: skip
 
     if ack is not None:
         led.blink(ntimes=6, bsleep=0.4, tsleep=0.2, esleep=0.4)
@@ -123,6 +134,7 @@ while True:
             led.blink(ntimes=2, bsleep=0.1, tsleep=0.1, esleep=0.1)
             d = _parse_packet(msg)
             if d is not None:
-                if "msg_type" not in d:
-                    d["msg_type"] = "telemetry"
+                # Annotate msg_type for old firmware that predates the field
+                if not d.get("msg_type"):
+                    d["msg_type"] = pack.MSG_TELEMETRY
                 _print_json(d)
