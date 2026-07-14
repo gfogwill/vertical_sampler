@@ -6,6 +6,7 @@ import threading
 import time
 from enum import Enum
 import datetime
+import struct
 
 import serial
 
@@ -33,6 +34,13 @@ FILL_FLOAT = -1e9
 PAYLOAD_CYCLE_S  = 35
 RETRY_INTERVAL_S = 5
 MAX_RETRIES      = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
+
+# Wire format constants (must match payload/pack.py)
+_MSG_TYPE_LEN  = 8
+_MSG_TELEMETRY = "telemetry"
+_MSG_CMD_ACK   = "cmd_ack"
+_MSG_CMD_ERR   = "cmd_err"
+_CMD_RESPONSE_TYPES = {_MSG_CMD_ACK, _MSG_CMD_ERR}
 
 FIELDS = [
     ("gps_latitude",                "Latitude",          "\u00b0",    "GPS"),
@@ -172,18 +180,60 @@ def _read_json_line(ser, timeout_s):
     return None
 
 
+def _drain_serial(ser, timeout_s=0.5):
+    """Discard stale bytes/lines already in the serial buffer."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if ser.in_waiting:
+            ser.readline()  # discard
+        else:
+            time.sleep(0.05)
+
+
+def _read_cmd_response(ser, timeout_s):
+    """Read lines until we get a command_ack or command_error packet.
+
+    Heartbeat/telemetry packets (msg_type == 'telemetry' or missing) are
+    silently skipped so they cannot be mistaken for a command ACK.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if ser.in_waiting:
+            raw = ser.readline()
+            # Skip null bytes / garbage
+            if not raw or raw == b"\x00" * len(raw):
+                continue
+            text = raw.decode(errors="ignore").strip()
+            if not text:
+                continue
+            if text.startswith("{"):
+                try:
+                    d = json.loads(text)
+                    msg_type = d.get("msg_type", _MSG_TELEMETRY)
+                    if msg_type in _CMD_RESPONSE_TYPES:
+                        return d
+                    # else: telemetry/heartbeat — keep waiting
+                except json.JSONDecodeError:
+                    pass
+        else:
+            time.sleep(0.05)
+    return None
+
+
 def relay_cmd(args):
     cmd = _build_cmd(args)
     with find_serial() as ser:
         time.sleep(0.2)
-        ser.reset_input_buffer()
+        # Drain stale packets before sending so we don't confuse an old
+        # heartbeat with our command's ACK.
+        _drain_serial(ser, timeout_s=0.5)
         for attempt in range(1, MAX_RETRIES + 1):
             print("Sending command (attempt {}/{})...".format(attempt, MAX_RETRIES), end="", flush=True)
             ser.write(cmd)
             ser.flush()
-            data = _read_json_line(ser, timeout_s=RETRY_INTERVAL_S)
+            data = _read_cmd_response(ser, timeout_s=RETRY_INTERVAL_S)
             if data is not None:
-                print(" OK")
+                print(" OK" if data.get("msg_type") == _MSG_CMD_ACK else " ERROR")
                 if args.subcommand == "data":
                     pretty_print(data, payload_id=str(args.payload))
                 else:
@@ -243,10 +293,10 @@ class PollWorker(threading.Thread):
     def _poll_one(self, ser, payload):
         """Send explicit data request and wait for response."""
         cmd = "{} data\n".format(payload).encode()
-        ser.reset_input_buffer()
+        _drain_serial(ser, timeout_s=0.5)
         ser.write(cmd)
         ser.flush()
-        d = _read_json_line(ser, timeout_s=6)
+        d = _read_cmd_response(ser, timeout_s=6)
         if d is not None:
             d["_ts"] = time.time()
             self._enrich(d)
@@ -255,13 +305,11 @@ class PollWorker(threading.Thread):
 
     def _send_control(self, ser, cmd_bytes):
         """Send a pump/valve command and wait for the updated data packet."""
-        ser.reset_input_buffer()
+        _drain_serial(ser, timeout_s=0.5)
         ser.write(cmd_bytes)
         ser.flush()
-        d = _read_json_line(ser, timeout_s=8)
+        d = _read_cmd_response(ser, timeout_s=8)
         if d is not None:
-            # Infer payload from pump_front_state presence (both payloads have it)
-            # The result is tagged by the caller via _CMD_CONTROL tuple.
             d["_ts"] = time.time()
             self._enrich(d)
             self._log(d)
@@ -271,15 +319,19 @@ class PollWorker(threading.Thread):
         """Non-blocking: read one line if available, parse as JSON."""
         if ser.in_waiting:
             raw = ser.readline()
+            if not raw or raw == b"\x00" * len(raw):
+                return
             text = raw.decode(errors="ignore").strip()
             if text.startswith("{"):
                 try:
                     d = json.loads(text)
+                    msg_type = d.get("msg_type", _MSG_TELEMETRY)
+                    if msg_type != _MSG_TELEMETRY:
+                        return  # ignore stray ACK/error outside a command context
                     d["_ts"] = time.time()
                     self._enrich(d)
                     self._log(d)
-                    # Identify payload by rssi sign or just broadcast to all
-                    self.result_q.put((None, d))  # None = heartbeat, no specific payload
+                    self.result_q.put((None, d))
                 except Exception:
                     pass
 
@@ -436,8 +488,6 @@ def _run_monitor(payloads, qnh, log_file):
                     elif "_error" in d:
                         add_event("Serial error: {}".format(d["_error"]))
                     else:
-                        # Heartbeat (payload=None): match to payload by payload_id field
-                        # or update all if ambiguous
                         target = payload
                         if target is None:
                             pid = d.get("payload_id", "")
@@ -453,7 +503,6 @@ def _run_monitor(payloads, qnh, log_file):
                                      else "N/A")
                             add_event("{} \u2014 P={} hPa".format(target, p_str))
                         elif target is None:
-                            # Can't identify payload, skip silently
                             pass
             except queue.Empty:
                 pass
@@ -529,7 +578,6 @@ def _run_monitor(payloads, qnh, log_file):
     except Exception as exc:
         worker.cmd_q.put(_CMD_QUIT)
         print("[monitor] curses error ({}), falling back to plain poll.".format(exc))
-        # Plain fallback: just poll once and print
         worker2 = PollWorker(payloads, qnh, log_file)
         worker2.start()
         worker2.cmd_q.put(_CMD_POLL_ALL)

@@ -1,6 +1,7 @@
 import struct
 
 KEYS = [
+    ("msg_type",                    "8s"),
     ("gps_time",                    "L"),
     ("gps_latitude",                "f"),
     ("gps_longitude",               "f"),
@@ -25,20 +26,31 @@ INT_FILLVAL          = -999999
 UNSIGNED_INT_FILLVAL = 4294967295
 FLOAT_FILLVAL        = -1e9
 _STR_LEN             = 10
+_MSG_TYPE_LEN        = 8
+
+# Valid msg_type values
+MSG_TELEMETRY     = "telemetry"
+MSG_COMMAND_ACK   = "cmd_ack"
+MSG_COMMAND_ERROR = "cmd_err"
 
 
 def dict2bytes(d: dict) -> bytes:
+    # Transitional: dicts without msg_type default to telemetry
+    if "msg_type" not in d:
+        d = dict(d)
+        d["msg_type"] = MSG_TELEMETRY
     tup = []
     for key, fmt in KEYS:
         val = d.get(key)
-        if fmt == "10s":
+        if fmt.endswith("s"):
+            length = int(fmt[:-1])
             if val is None:
-                tup.append(b"\x00" * _STR_LEN)
+                tup.append(b"\x00" * length)
             else:
                 b = val.encode() if isinstance(val, str) else bytes(val)
-                b = b[:_STR_LEN]
-                if len(b) < _STR_LEN:
-                    b = b + b"\x00" * (_STR_LEN - len(b))
+                b = b[:length]
+                if len(b) < length:
+                    b = b + b"\x00" * (length - len(b))
                 tup.append(b)
         elif val is None:
             tup.append(
@@ -55,8 +67,7 @@ def bytes2dict(b) -> dict:
     tup = struct.unpack(FORMAT, b)
     result = {}
     for (k, fmt), v in zip(KEYS, tup):
-        if fmt == "10s":
-            # CircuitPython bytes.decode() has no 'errors' kwarg
+        if fmt.endswith("s"):
             try:
                 result[k] = v.rstrip(b"\x00").decode()
             except Exception:
