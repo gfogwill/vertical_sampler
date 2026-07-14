@@ -27,7 +27,10 @@ class LoRa:
         return self.rfm9x.receive(timeout=timeout)
 
     def rssi(self):
-        return self.rfm9x.rssi
+        # Use the value cached by adafruit_rfm9x at receive() time.
+        # Avoids a live SPI register read between packets, which is stale
+        # anyway and adds unnecessary bus contention with the shared SD SPI.
+        return self.rfm9x.last_rssi
 
     def set_destination(self, destination):
         self.rfm9x.destination = destination
