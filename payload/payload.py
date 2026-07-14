@@ -23,28 +23,20 @@ BOARD_GP_PUMP_BACK = board.GP21
 BOARD_GP_BATTERY_MONITOR = board.GP27
 BOARD_GP_FLOWMETER = board.GP28
 
-# Voltage divider on flowmeter analog output: 10kΩ (series) + 32.6kΩ (to GND)
 _FLOW_DIVIDER_RATIO = 32.6 / (10.0 + 32.6)
 _FLOW_FULL_SCALE_V = 4.0
 _FLOW_FULL_SCALE_LMIN = 20.0
-_FLOW_OFFSET_LMIN = 0.25  # calibrate: set to flow() reading with pump off
+_FLOW_OFFSET_LMIN = 0.25
 
-# Battery voltage calibration (6S Li-ion, calibrated against multimeter)
-# raw_adc=2.44417V -> reported 24.44V, multimeter=24.82V -> factor=10.15
 _BAT_CAL_FACTOR = 10.15
-_BAT_WARN_V = 19.8    # 3.3V * 6
-_BAT_CUTOFF_V = 18.6  # 3.1V * 6
+_BAT_WARN_V = 19.8
+_BAT_CUTOFF_V = 18.6
 
-# CPU temperature thresholds (Celsius)
 _TEMP_WARN_C = 45.0
 _TEMP_CRITICAL_C = 55.0
 
-# Watchdog: reset if main loop hangs for more than this many seconds
 _WATCHDOG_TIMEOUT_S = 30
 
-# Automatic heartbeat: send a data packet every HEARTBEAT_INTERVAL_S seconds.
-# Each payload uses a fixed offset to reduce the chance of simultaneous
-# transmissions colliding on the shared LoRa channel.
 HEARTBEAT_INTERVAL_S = 60
 HEARTBEAT_OFFSETS = {
     "matorova":   0,
@@ -189,9 +181,14 @@ class GPS:
         )
         self.sensor.send_command(b"PMTK314,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0")
         self.sensor.send_command(b"PMTK220,1000")
+        self._last_lat = None
+        self._last_lon = None
+        self._last_alt = None
+        self._last_time = None
         logger.info("GPS initialized")
 
     def lat_lon_alt_time(self, max_attempts=5, timeout=10):
+        """Full GPS poll: waits up to timeout/max_attempts for a fix."""
         global _rtc_synced
         gps = self.sensor
         gps.update()
@@ -200,7 +197,7 @@ class GPS:
         while not gps.has_fix and (time.time() - start_time < timeout) and attempts < max_attempts:
             self.logger.debug("Waiting for GPS fix...")
             gps.update()
-            _feed_watchdog()  # GPS wait loop can be slow
+            _feed_watchdog()
             time.sleep(1)
             attempts += 1
         if not gps.has_fix:
@@ -215,6 +212,10 @@ class GPS:
             alt = gps.altitude_m
             try:
                 if all(x is not None for x in (lat, lon, alt, time_)):
+                    self._last_lat = lat
+                    self._last_lon = lon
+                    self._last_alt = alt
+                    self._last_time = time_
                     if not _rtc_synced:
                         try:
                             _rtc.datetime = time_
@@ -229,25 +230,40 @@ class GPS:
         self.logger.error("Lost GPS fix")
         return None, None, None, None
 
+    def lat_lon_alt_time_fast(self):
+        """Non-blocking GPS poll: pumps NMEA buffer once, returns cached
+        fix if still valid, None tuple if no fix.  Use on the command
+        path where blocking for 5 s would make the ACK arrive too late."""
+        gps = self.sensor
+        gps.update()  # drain NMEA buffer, ~0 ms
+        if gps.has_fix:
+            lat = gps.latitude
+            lon = gps.longitude
+            alt = gps.altitude_m
+            time_ = gps.timestamp_utc
+            if all(x is not None for x in (lat, lon, alt, time_)):
+                self._last_lat = lat
+                self._last_lon = lon
+                self._last_alt = alt
+                self._last_time = time_
+                return lat, lon, alt, time_
+        # Return last known fix if available
+        if self._last_lat is not None:
+            return self._last_lat, self._last_lon, self._last_alt, self._last_time
+        return None, None, None, None
+
 
 def _check_safety(pump, valve, bat_v, logger):
-    """Check CPU temperature and battery. Cut pump and valve if critical."""
     cpu_temp = microcontroller.cpu.temperature
-
     if cpu_temp >= _TEMP_CRITICAL_C:
-        logger.error(
-            "CPU temp critical: {:.1f}C — cutting pump & valve".format(cpu_temp)
-        )
+        logger.error("CPU temp critical: {:.1f}C - cutting pump & valve".format(cpu_temp))
         pump.emergency_off()
         valve.set_state("off")
     elif cpu_temp >= _TEMP_WARN_C:
         logger.warning("CPU temp warning: {:.1f}C".format(cpu_temp))
-
     if bat_v > 1.0:
         if bat_v <= _BAT_CUTOFF_V:
-            logger.error(
-                "Battery critical: {:.2f}V — cutting pump & valve".format(bat_v)
-            )
+            logger.error("Battery critical: {:.2f}V - cutting pump & valve".format(bat_v))
             pump.emergency_off()
             valve.set_state("off")
         elif bat_v <= _BAT_WARN_V:
@@ -272,9 +288,13 @@ def _failed_reading_data(lora, logger):
         time.sleep(2)
 
 
-def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time):
+def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat,
+                  flow_meter, pump, valve, lora, start_time, fast_gps=False):
     elapsed_time = time.time() - start_time
-    lat, lon, alt, time_ = gps.lat_lon_alt_time()
+    if fast_gps:
+        lat, lon, alt, time_ = gps.lat_lon_alt_time_fast()
+    else:
+        lat, lon, alt, time_ = gps.lat_lon_alt_time()
     rh_humidity, rh_temperature = rh_sensor.humidity_and_temperature()
     bat_v = bat.voltage()
     cpu_temp = microcontroller.cpu.temperature
@@ -300,8 +320,7 @@ def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, 
 
 
 def _send_with_type(lora, data, msg_type):
-    """Copy data dict, set msg_type, and send. Avoids {**dict} spread
-    which is not supported in CircuitPython."""
+    """Copy data dict, set msg_type, and send."""
     pkt = data.copy()
     pkt["msg_type"] = msg_type
     lora.send(pack.dict2bytes(pkt))
@@ -315,20 +334,22 @@ def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
             return
         main_cmd = cmd[0]
         sub_cmd = cmd[1:]
+
+        if not data:
+            # data dict not yet populated (first cycle still running)
+            logger.warning("Command arrived before first data collection; sending fill-value ack")
+
         if main_cmd == "pump":
             if len(sub_cmd) < 2:
                 raise ValueError("pump requires <location> <state>")
-            pump_loc = sub_cmd[0]
-            state = sub_cmd[1]
-            pump.set_state(pump_loc, state)
+            pump.set_state(sub_cmd[0], sub_cmd[1])
             data["pump_front_state"] = pump.get_front_state()
             data["pump_back_state"] = pump.get_back_state()
             logger.info("Processed pump command: {}".format(msg_in))
         elif main_cmd == "valve":
             if len(sub_cmd) < 1:
                 raise ValueError("valve requires <state>")
-            state = sub_cmd[0]
-            valve.set_state(state)
+            valve.set_state(sub_cmd[0])
             data["valve_state"] = valve.get_state()
             logger.info("Processed valve command: {}".format(msg_in))
         elif main_cmd == "data":
@@ -336,10 +357,17 @@ def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
         else:
             logger.warning("Unexpected command: {}".format(msg_in))
             return
-        _send_with_type(lora, data, "cmd_ack")
+
+        _send_with_type(lora, data, pack.MSG_COMMAND_ACK)
+        logger.info("cmd_ack sent for: {}".format(main_cmd))
+
     except Exception as err:
         logger.error("Error processing command: {}".format(err))
-        _send_with_type(lora, data, "cmd_err")
+        try:
+            _send_with_type(lora, data, pack.MSG_COMMAND_ERROR)
+            logger.info("cmd_err sent")
+        except Exception as send_err:
+            logger.error("cmd_err send also failed: {}".format(send_err))
 
 
 def main_loop(lora, payload_id, logger):
@@ -362,6 +390,7 @@ def main_loop(lora, payload_id, logger):
 
     start_time = time.time()
     data = {}
+    _fast_next = False  # if True, use fast GPS on the next _collect_data
 
     _hb_offset = HEARTBEAT_OFFSETS.get(payload_id, 0)
     _next_heartbeat = time.monotonic() + _hb_offset
@@ -372,21 +401,25 @@ def main_loop(lora, payload_id, logger):
 
         try:
             data = _collect_data(
-                payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, pump, valve, lora, start_time
+                payload_id, gps, rh_sensor, pressure_sensor, bat,
+                flow_meter, pump, valve, lora, start_time,
+                fast_gps=_fast_next,
             )
+            _fast_next = False
             _check_safety(pump, valve, data["battery_voltage"], logger)
             led.blink(2)
             logger.data(data)
             logger.info("Sensor data collected")
         except Exception as err:
             logger.error("Error reading data: {}".format(err))
+            _fast_next = False
             _failed_reading_data(lora, logger)
             continue
 
         now_mono = time.monotonic()
         if now_mono >= _next_heartbeat:
             try:
-                _send_with_type(lora, data, "telemetry")
+                _send_with_type(lora, data, pack.MSG_TELEMETRY)
                 logger.info("Heartbeat sent")
             except Exception as err:
                 logger.error("Heartbeat send failed: {}".format(err))
@@ -402,6 +435,8 @@ def main_loop(lora, payload_id, logger):
             if msg is not None:
                 _handle_command(msg, data, pump, valve, lora, payload_id, logger)
                 got_cmd = True
+                # Use fast GPS next cycle so ACK window stays within ground's retry budget
+                _fast_next = True
                 deadline = time.time() + 3
             elif got_cmd:
                 break
