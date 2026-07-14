@@ -19,29 +19,40 @@ spi = busio.SPI(BOARD_GP_LORA_SCK, MOSI=BOARD_GP_LORA_TX, MISO=BOARD_GP_LORA_RX)
 
 
 def main():
-    sd_card = SDCard(spi, fname="log.txt")
-    logger = logging.getLogger("payload-main", sd_card)
-
-    logger.info("Starting main function")
-
+    # LoRa MUST be initialized first: its __init__ does a hardware reset and
+    # reads the VERSION register.  If the SD card touches the shared SPI bus
+    # first and leaves it in a bad state (e.g. failed mount), the RFM9x will
+    # not see VERSION==18 and raise RuntimeError.  SD runs in degraded mode
+    # (no writes) if it fails, so it is safe to init it second.
     try:
         lora = LoRa(
             spi=spi,
             node=address.kenttarova_rfm_address,
-            destination=address.ground_rfm_address
+            destination=address.ground_rfm_address,
         )
+    except Exception as e:
+        # Without LoRa there is nothing we can do — print and let the watchdog
+        # reset the board rather than hanging silently.
+        print("FATAL: LoRa init failed: {}".format(e))
+        raise
 
-        logger.debug(
-            "LoRa initialized with node: {}, destination: {}".format(
-                address.kenttarova_rfm_address,
-                address.ground_rfm_address
-            )
+    # SDCard accepts (spi, payload_id).  It runs in degraded mode on failure.
+    sd_card = SDCard(spi, PAYLOAD_ID)
+    logger = logging.getLogger("payload-main", sd_card)
+
+    logger.info("Starting main function")
+    logger.debug(
+        "LoRa initialized with node: {}, destination: {}".format(
+            address.kenttarova_rfm_address,
+            address.ground_rfm_address,
         )
+    )
 
+    try:
         main_loop(
             lora=lora,
             payload_id=PAYLOAD_ID,
-            logger=logger
+            logger=logger,
         )
     except Exception as e:
         logger.error("An error occurred in the main function: {}".format(e))
