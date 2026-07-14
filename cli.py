@@ -36,7 +36,7 @@ RETRY_INTERVAL_S = 5
 MAX_RETRIES      = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
 
 # Wire format constants (must match payload/pack.py)
-_MSG_TYPE_LEN  = 8
+_MSG_TYPE_LEN  = 12   # was 8, field is actually 12s in struct format
 _MSG_TELEMETRY = "telemetry"
 _MSG_CMD_ACK   = "cmd_ack"
 _MSG_CMD_ERR   = "cmd_err"
@@ -190,11 +190,17 @@ def _drain_serial(ser, timeout_s=0.5):
             time.sleep(0.05)
 
 
-def _read_cmd_response(ser, timeout_s):
-    """Read lines until we get a command_ack or command_error packet.
+def _read_cmd_response(ser, timeout_s, accept_telemetry=False):
+    """Read lines until we get a suitable response packet.
 
-    Heartbeat/telemetry packets (msg_type == 'telemetry' or missing) are
-    silently skipped so they cannot be mistaken for a command ACK.
+    If accept_telemetry=True (used for the 'data' command), a
+    msg_type='telemetry' packet is also accepted as a valid response.
+    This is necessary because the payload replies to 'data' requests
+    with its normal telemetry struct, not a dedicated cmd_ack packet.
+
+    If accept_telemetry=False (default, used for pump/valve), only
+    cmd_ack and cmd_err are accepted; heartbeats are skipped so they
+    cannot be mistaken for a command acknowledgement.
     """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -212,7 +218,10 @@ def _read_cmd_response(ser, timeout_s):
                     msg_type = d.get("msg_type", _MSG_TELEMETRY)
                     if msg_type in _CMD_RESPONSE_TYPES:
                         return d
-                    # else: telemetry/heartbeat — keep waiting
+                    if accept_telemetry and msg_type == _MSG_TELEMETRY:
+                        return d
+                    # else: skip (heartbeat while waiting for cmd ACK,
+                    # or telemetry not accepted in this context)
                 except json.JSONDecodeError:
                     pass
         else:
@@ -222,6 +231,8 @@ def _read_cmd_response(ser, timeout_s):
 
 def relay_cmd(args):
     cmd = _build_cmd(args)
+    # 'data' command: response is a telemetry packet, not a cmd_ack
+    is_data = (args.subcommand == "data")
     with find_serial() as ser:
         time.sleep(0.2)
         # Drain stale packets before sending so we don't confuse an old
@@ -231,9 +242,10 @@ def relay_cmd(args):
             print("Sending command (attempt {}/{})...".format(attempt, MAX_RETRIES), end="", flush=True)
             ser.write(cmd)
             ser.flush()
-            data = _read_cmd_response(ser, timeout_s=RETRY_INTERVAL_S)
+            data = _read_cmd_response(ser, timeout_s=RETRY_INTERVAL_S,
+                                      accept_telemetry=is_data)
             if data is not None:
-                print(" OK" if data.get("msg_type") == _MSG_CMD_ACK else " ERROR")
+                print(" OK" if data.get("msg_type") != _MSG_CMD_ERR else " ERROR")
                 if args.subcommand == "data":
                     pretty_print(data, payload_id=str(args.payload))
                 else:
@@ -291,12 +303,13 @@ class PollWorker(threading.Thread):
                 pass
 
     def _poll_one(self, ser, payload):
-        """Send explicit data request and wait for response."""
+        """Send explicit data request and wait for telemetry response."""
         cmd = "{} data\n".format(payload).encode()
         _drain_serial(ser, timeout_s=0.5)
         ser.write(cmd)
         ser.flush()
-        d = _read_cmd_response(ser, timeout_s=6)
+        # 'data' command: payload replies with a telemetry packet
+        d = _read_cmd_response(ser, timeout_s=6, accept_telemetry=True)
         if d is not None:
             d["_ts"] = time.time()
             self._enrich(d)
@@ -308,7 +321,8 @@ class PollWorker(threading.Thread):
         _drain_serial(ser, timeout_s=0.5)
         ser.write(cmd_bytes)
         ser.flush()
-        d = _read_cmd_response(ser, timeout_s=8)
+        # Control commands: accept both cmd_ack and telemetry
+        d = _read_cmd_response(ser, timeout_s=8, accept_telemetry=True)
         if d is not None:
             d["_ts"] = time.time()
             self._enrich(d)
@@ -326,7 +340,7 @@ class PollWorker(threading.Thread):
                 try:
                     d = json.loads(text)
                     msg_type = d.get("msg_type", _MSG_TELEMETRY)
-                    if msg_type != _MSG_TELEMETRY:
+                    if msg_type not in (_MSG_TELEMETRY, ""):
                         return  # ignore stray ACK/error outside a command context
                     d["_ts"] = time.time()
                     self._enrich(d)
@@ -490,7 +504,8 @@ def _run_monitor(payloads, qnh, log_file):
                     else:
                         target = payload
                         if target is None:
-                            pid = d.get("payload_id", "")
+                            # Passive heartbeat: match by payload_id field
+                            pid = d.get("payload_id", "").strip()
                             for p in payloads:
                                 if str(p) == pid:
                                     target = p
@@ -503,7 +518,9 @@ def _run_monitor(payloads, qnh, log_file):
                                      else "N/A")
                             add_event("{} \u2014 P={} hPa".format(target, p_str))
                         elif target is None:
-                            pass
+                            # payload_id in packet didn't match any known payload
+                            add_event("heartbeat: unknown payload_id={!r}".format(
+                                d.get("payload_id", "?")))
             except queue.Empty:
                 pass
 
