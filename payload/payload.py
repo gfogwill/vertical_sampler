@@ -309,12 +309,16 @@ def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
             return
         main_cmd, *sub_cmd = cmd
         if main_cmd == "pump":
+            if len(sub_cmd) < 2:
+                raise ValueError("pump requires <location> <state>")
             pump_loc, state = sub_cmd[0], sub_cmd[1]
             pump.set_state(pump_loc, state)
             data["pump_front_state"] = pump.get_front_state()
             data["pump_back_state"] = pump.get_back_state()
             logger.info("Processed pump command: {}".format(msg_in))
         elif main_cmd == "valve":
+            if len(sub_cmd) < 1:
+                raise ValueError("valve requires <state>")
             state = sub_cmd[0]
             valve.set_state(state)
             data["valve_state"] = valve.get_state()
@@ -324,10 +328,10 @@ def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
         else:
             logger.warning("Unexpected command: {}".format(msg_in))
             return
-        lora.send(pack.dict2bytes(data))
+        lora.send(pack.dict2bytes({**data, "msg_type": "command_ack"}))
     except Exception as err:
         logger.error("Error processing command: {}".format(err))
-        lora.send("error: {}\n".format(err).encode())
+        lora.send(pack.dict2bytes({**data, "msg_type": "command_error"}))
 
 
 def main_loop(lora, payload_id, logger):
@@ -377,7 +381,7 @@ def main_loop(lora, payload_id, logger):
         now_mono = time.monotonic()
         if now_mono >= _next_heartbeat:
             try:
-                lora.send(pack.dict2bytes(data))
+                lora.send(pack.dict2bytes({**data, "msg_type": "telemetry"}))
                 logger.info("Heartbeat sent")
             except Exception as err:
                 logger.error("Heartbeat send failed: {}".format(err))
