@@ -36,11 +36,13 @@ RETRY_INTERVAL_S = 5
 MAX_RETRIES      = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
 
 # Wire format constants (must match payload/pack.py)
-_MSG_TYPE_LEN  = 12   # was 8, field is actually 12s in struct format
+_MSG_TYPE_LEN  = 12   # field is 12s in struct format
 _MSG_TELEMETRY = "telemetry"
 _MSG_CMD_ACK   = "cmd_ack"
 _MSG_CMD_ERR   = "cmd_err"
 _CMD_RESPONSE_TYPES = {_MSG_CMD_ACK, _MSG_CMD_ERR}
+
+_UTC = datetime.timezone.utc
 
 FIELDS = [
     ("gps_latitude",                "Latitude",          "\u00b0",    "GPS"),
@@ -91,7 +93,7 @@ def _fmt_value(key, val):
         return "N/A", True
     if key == "gps_time":
         try:
-            ts = datetime.datetime.utcfromtimestamp(val)
+            ts = datetime.datetime.fromtimestamp(val, tz=_UTC)
             return ts.strftime("%H:%M:%S"), False
         except Exception:
             return str(val), False
@@ -195,18 +197,14 @@ def _read_cmd_response(ser, timeout_s, accept_telemetry=False):
 
     If accept_telemetry=True (used for the 'data' command), a
     msg_type='telemetry' packet is also accepted as a valid response.
-    This is necessary because the payload replies to 'data' requests
-    with its normal telemetry struct, not a dedicated cmd_ack packet.
-
-    If accept_telemetry=False (default, used for pump/valve), only
-    cmd_ack and cmd_err are accepted; heartbeats are skipped so they
-    cannot be mistaken for a command acknowledgement.
+    If accept_telemetry=False (default), only cmd_ack and cmd_err are
+    accepted; heartbeats are skipped so they cannot be mistaken for a
+    command acknowledgement.
     """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if ser.in_waiting:
             raw = ser.readline()
-            # Skip null bytes / garbage
             if not raw or raw == b"\x00" * len(raw):
                 continue
             text = raw.decode(errors="ignore").strip()
@@ -220,8 +218,6 @@ def _read_cmd_response(ser, timeout_s, accept_telemetry=False):
                         return d
                     if accept_telemetry and msg_type == _MSG_TELEMETRY:
                         return d
-                    # else: skip (heartbeat while waiting for cmd ACK,
-                    # or telemetry not accepted in this context)
                 except json.JSONDecodeError:
                     pass
         else:
@@ -231,12 +227,9 @@ def _read_cmd_response(ser, timeout_s, accept_telemetry=False):
 
 def relay_cmd(args):
     cmd = _build_cmd(args)
-    # 'data' command: response is a telemetry packet, not a cmd_ack
     is_data = (args.subcommand == "data")
     with find_serial() as ser:
         time.sleep(0.2)
-        # Drain stale packets before sending so we don't confuse an old
-        # heartbeat with our command's ACK.
         _drain_serial(ser, timeout_s=0.5)
         for attempt in range(1, MAX_RETRIES + 1):
             print("Sending command (attempt {}/{})...".format(attempt, MAX_RETRIES), end="", flush=True)
@@ -266,18 +259,11 @@ _PAYLOADS_ALL = [Payload.MATOROVA, Payload.KENTTAROVA]
 
 _CMD_POLL_ALL  = "poll_all"
 _CMD_POLL_ONE  = "poll_one"
-_CMD_CONTROL   = "control"   # (payload, cmd_bytes)
+_CMD_CONTROL   = "control"
 _CMD_QUIT      = "quit"
 
 
 class PollWorker(threading.Thread):
-    """Background thread that owns the serial port.
-
-    In idle state it reads passively — heartbeats from the ground
-    station arrive as JSON lines without any poll command.  Control
-    commands and explicit poll requests are queued via cmd_q.
-    """
-
     def __init__(self, payloads, qnh, log_file):
         super().__init__(daemon=True)
         self.payloads = payloads
@@ -303,12 +289,10 @@ class PollWorker(threading.Thread):
                 pass
 
     def _poll_one(self, ser, payload):
-        """Send explicit data request and wait for telemetry response."""
         cmd = "{} data\n".format(payload).encode()
         _drain_serial(ser, timeout_s=0.5)
         ser.write(cmd)
         ser.flush()
-        # 'data' command: payload replies with a telemetry packet
         d = _read_cmd_response(ser, timeout_s=6, accept_telemetry=True)
         if d is not None:
             d["_ts"] = time.time()
@@ -317,11 +301,9 @@ class PollWorker(threading.Thread):
         self.result_q.put((payload, d))
 
     def _send_control(self, ser, cmd_bytes):
-        """Send a pump/valve command and wait for the updated data packet."""
         _drain_serial(ser, timeout_s=0.5)
         ser.write(cmd_bytes)
         ser.flush()
-        # Control commands: accept both cmd_ack and telemetry
         d = _read_cmd_response(ser, timeout_s=8, accept_telemetry=True)
         if d is not None:
             d["_ts"] = time.time()
@@ -330,7 +312,6 @@ class PollWorker(threading.Thread):
         return d
 
     def _try_parse_heartbeat(self, ser):
-        """Non-blocking: read one line if available, parse as JSON."""
         if ser.in_waiting:
             raw = ser.readline()
             if not raw or raw == b"\x00" * len(raw):
@@ -341,7 +322,7 @@ class PollWorker(threading.Thread):
                     d = json.loads(text)
                     msg_type = d.get("msg_type", _MSG_TELEMETRY)
                     if msg_type not in (_MSG_TELEMETRY, ""):
-                        return  # ignore stray ACK/error outside a command context
+                        return
                     d["_ts"] = time.time()
                     self._enrich(d)
                     self._log(d)
@@ -361,7 +342,6 @@ class PollWorker(threading.Thread):
             ser.reset_input_buffer()
 
             while True:
-                # Check for queued commands first (non-blocking)
                 try:
                     item = self.cmd_q.get_nowait()
                     if item == _CMD_QUIT:
@@ -379,7 +359,6 @@ class PollWorker(threading.Thread):
                 except queue.Empty:
                     pass
 
-                # Idle: passively read heartbeats arriving from ground
                 self._try_parse_heartbeat(ser)
                 time.sleep(0.05)
 
@@ -433,7 +412,6 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows):
                 break
             val = data.get(key)
             val_str, is_fill = _fmt_value(key, val)
-            # Highlight pump/valve ON state in green
             if key in ("pump_front_state", "pump_back_state") and val:
                 attr = curses.color_pair(4) | curses.A_BOLD
             elif key == "valve_state" and val:
@@ -462,7 +440,6 @@ def _run_monitor(payloads, qnh, log_file):
             events.pop(0)
 
     def _toggle_pump(payload, location):
-        """Toggle pump front or back for payload."""
         cur = state[payload].get(
             "pump_front_state" if location == "front" else "pump_back_state", 0
         )
@@ -472,7 +449,6 @@ def _run_monitor(payloads, qnh, log_file):
         add_event("{} pump {} -> {}".format(payload, location, new_state.upper()))
 
     def _toggle_valve(payload):
-        """Toggle valve for payload."""
         cur = state[payload].get("valve_state", 0)
         new_state = "off" if cur else "on"
         cmd = "{} valve {}\n".format(payload, new_state).encode()
@@ -492,7 +468,6 @@ def _run_monitor(payloads, qnh, log_file):
         add_event("Monitor started. Listening for heartbeats...")
 
         while True:
-            # Drain result queue
             try:
                 while True:
                     payload, d = worker.result_q.get_nowait()
@@ -504,7 +479,6 @@ def _run_monitor(payloads, qnh, log_file):
                     else:
                         target = payload
                         if target is None:
-                            # Passive heartbeat: match by payload_id field
                             pid = d.get("payload_id", "").strip()
                             for p in payloads:
                                 if str(p) == pid:
@@ -518,16 +492,14 @@ def _run_monitor(payloads, qnh, log_file):
                                      else "N/A")
                             add_event("{} \u2014 P={} hPa".format(target, p_str))
                         elif target is None:
-                            # payload_id in packet didn't match any known payload
                             add_event("heartbeat: unknown payload_id={!r}".format(
                                 d.get("payload_id", "?")))
             except queue.Empty:
                 pass
 
-            # Draw
             stdscr.erase()
             rows, cols = stdscr.getmaxyx()
-            ts_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            ts_now = datetime.datetime.now(tz=_UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
             header = " Vertical Sampler Monitor  {}  QNH={} hPa ".format(ts_now, qnh)
             _safe_addnstr(stdscr, 0, 0, header.ljust(cols - 1), cols - 1,
                           curses.color_pair(2) | curses.A_REVERSE)
@@ -550,7 +522,7 @@ def _run_monitor(payloads, qnh, log_file):
                 er = events_start + j
                 if er >= rows - 1:
                     break
-                t_str = datetime.datetime.utcfromtimestamp(evt_ts).strftime("%H:%M:%S")
+                t_str = datetime.datetime.fromtimestamp(evt_ts, tz=_UTC).strftime("%H:%M:%S")
                 _safe_addnstr(stdscr, er, 0,
                               "  {} {}".format(t_str, evt_msg).ljust(cols - 1),
                               cols - 1, curses.color_pair(1))
@@ -567,7 +539,6 @@ def _run_monitor(payloads, qnh, log_file):
             stdscr.noutrefresh()
             curses.doupdate()
 
-            # Key input
             ch = stdscr.getch()
             if ch == ord('q'):
                 worker.cmd_q.put(_CMD_QUIT)
