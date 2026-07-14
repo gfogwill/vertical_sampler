@@ -9,10 +9,12 @@ BOARD_GP_LORA_RESET = board.GP14
 
 class LoRa:
     def __init__(self, spi, node, destination):
+        self.cs = digitalio.DigitalInOut(BOARD_GP_LORA_CS)
+        self.reset = digitalio.DigitalInOut(BOARD_GP_LORA_RESET)
         self.rfm9x = adafruit_rfm9x.RFM9x(
             spi=spi,
-            cs=digitalio.DigitalInOut(BOARD_GP_LORA_CS),
-            reset=digitalio.DigitalInOut(BOARD_GP_LORA_RESET),
+            cs=self.cs,
+            reset=self.reset,
             frequency=868,
         )
         self.rfm9x.node = node
