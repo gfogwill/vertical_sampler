@@ -43,6 +43,12 @@ HEARTBEAT_OFFSETS = {
     "kenttarova": 30,
 }
 
+# Minimum byte length for a plausible command.  The shortest valid
+# command is "data" (4 bytes via LoRa, sent as "<payload> data\n" so
+# what the payload sees after stripping the address header is "data").
+# Anything shorter is garbage from a SPI glitch.
+_CMD_MIN_LEN = 4
+
 i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
 _rtc = rtc.RTC()
 _rtc_synced = False
@@ -326,7 +332,27 @@ def _send_with_type(lora, data, msg_type):
     lora.send(pack.dict2bytes(pkt))
 
 
+def _is_printable_ascii(b):
+    """Return True if every byte in b is a printable ASCII character
+    (0x20-0x7E) or a common whitespace byte (tab, newline, CR).
+    Used as a cheap pre-filter to discard SPI-glitch garbage before
+    attempting to parse a received LoRa frame as a command string.
+    """
+    for byte in b:
+        if not (0x20 <= byte <= 0x7E or byte in (0x09, 0x0A, 0x0D)):
+            return False
+    return True
+
+
 def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
+    # --- garbage filter ---------------------------------------------------
+    # After a SPI glitch the RFM9x can return spurious short packets
+    # (register echoes, FIFO residue).  Discard anything that is too
+    # short or contains non-printable bytes before touching cmd parsing.
+    if len(msg) < _CMD_MIN_LEN or not _is_printable_ascii(msg):
+        logger.debug("Discarding garbage frame ({} bytes)".format(len(msg)))
+        return
+    # ----------------------------------------------------------------------
     try:
         msg_in = msg.decode().strip()
         cmd = msg_in.split()
@@ -390,7 +416,7 @@ def main_loop(lora, payload_id, logger):
 
     start_time = time.time()
     data = {}
-    _fast_next = False  # if True, use fast GPS on the next _collect_data
+    _fast_next = False
 
     _hb_offset = HEARTBEAT_OFFSETS.get(payload_id, 0)
     _next_heartbeat = time.monotonic() + _hb_offset
@@ -413,13 +439,6 @@ def main_loop(lora, payload_id, logger):
         except Exception as err:
             logger.error("Error reading data: {}".format(err))
             _fast_next = False
-            # Attempt a hardware reset of the RFM9x before calling
-            # _failed_reading_data().  If the error was caused by a SPI
-            # glitch the module may be in an inconsistent state and
-            # subsequent send() calls would produce corrupted packets or
-            # silent failures.  reset_radio() is best-effort: if it
-            # raises, the inner except swallows it and we fall through
-            # to the same behaviour as before.
             try:
                 lora.reset_radio()
                 logger.info("LoRa reset after data error")
@@ -447,7 +466,6 @@ def main_loop(lora, payload_id, logger):
             if msg is not None:
                 _handle_command(msg, data, pump, valve, lora, payload_id, logger)
                 got_cmd = True
-                # Use fast GPS next cycle so ACK window stays within ground's retry budget
                 _fast_next = True
                 deadline = time.time() + 3
             elif got_cmd:
