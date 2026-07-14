@@ -9,7 +9,7 @@ import logging
 import board
 import busio
 
-PAYLOAD_ID = "kenttarova"
+PAYLOAD_ID = "matorova"
 
 BOARD_GP_LORA_SCK = board.GP2
 BOARD_GP_LORA_TX = board.GP3
@@ -27,7 +27,7 @@ def main():
     try:
         lora = LoRa(
             spi=spi,
-            node=address.kenttarova_rfm_address,
+            node=address.matorova_rfm_address,
             destination=address.ground_rfm_address,
         )
     except Exception as e:
@@ -38,12 +38,12 @@ def main():
 
     # SDCard accepts (spi, payload_id).  It runs in degraded mode on failure.
     sd_card = SDCard(spi, PAYLOAD_ID)
-    logger = logging.getLogger("payload-main", sd_card)
+    logger = logging.getLogger("{}-main".format(PAYLOAD_ID), sd_card)
 
-    logger.info("Starting main function")
+    logger.info("Starting {} payload".format(PAYLOAD_ID))
     logger.debug(
         "LoRa initialized with node: {}, destination: {}".format(
-            address.kenttarova_rfm_address,
+            address.matorova_rfm_address,
             address.ground_rfm_address,
         )
     )
@@ -55,7 +55,7 @@ def main():
             logger=logger,
         )
     except Exception as e:
-        logger.error("An error occurred in the main function: {}".format(e))
+        logger.error("An error occurred: {}".format(e))
 
 
 if __name__ == "__main__":
