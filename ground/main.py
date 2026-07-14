@@ -29,6 +29,10 @@ lora = LoRa(
 POLL = select.poll()
 POLL.register(sys.stdin, 1)
 
+# Expected wire sizes — used for a fast pre-check before struct.unpack.
+_WIRE_SIZE   = getattr(pack, "WIRE_SIZE",   None)
+_LEGACY_SIZE = getattr(pack, "LEGACY_SIZE", None)
+
 
 class UnexpectedCommand(Exception):
     pass
@@ -45,11 +49,23 @@ def _drain_lora(timeout=0.2, max_reads=8):
 
 
 def _parse_packet(msg):
+    """Try to deserialize a LoRa payload.  Returns dict or None.
+
+    Prints a one-line diagnostic to stdout (visible in Thonny) if the
+    packet fails to parse, so FORMAT mismatches are no longer silent.
+    """
     if not isinstance(msg, (bytes, bytearray)):
         return None
+    n = len(msg)
+    # Fast pre-check: if we know the expected sizes, reject obviously wrong lengths.
+    if _WIRE_SIZE is not None and _LEGACY_SIZE is not None:
+        if n not in (_WIRE_SIZE, _LEGACY_SIZE):
+            print("WARN pack: bad len={} (want {} or {})".format(n, _WIRE_SIZE, _LEGACY_SIZE))
+            return None
     try:
         return pack.bytes2dict(msg)
-    except Exception:
+    except Exception as e:
+        print("WARN pack: parse failed len={} err={}".format(n, e))
         return None
 
 
@@ -84,12 +100,11 @@ def _process_command(cmd_str):
 
         d = _parse_packet(msg)
         if d is None:
-            # Ignore stray/corrupt/non-pack frames
+            # parse error already printed above — keep waiting
             continue
 
         msg_type = d.get("msg_type", "")
 
-        # Use pack constants so these strings stay in sync with the wire format.
         if msg_type == pack.MSG_COMMAND_ACK:
             ack = d
             break
@@ -101,7 +116,6 @@ def _process_command(cmd_str):
             continue
         elif not msg_type:
             # Backward compat: old firmware without msg_type field.
-            # Accept as ACK only if the struct parsed cleanly.
             ack = d
             break
         # Unknown msg_type: skip
@@ -134,7 +148,6 @@ while True:
             led.blink(ntimes=2, bsleep=0.1, tsleep=0.1, esleep=0.1)
             d = _parse_packet(msg)
             if d is not None:
-                # Annotate msg_type for old firmware that predates the field
                 if not d.get("msg_type"):
                     d["msg_type"] = pack.MSG_TELEMETRY
                 _print_json(d)
