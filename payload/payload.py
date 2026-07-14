@@ -413,6 +413,18 @@ def main_loop(lora, payload_id, logger):
         except Exception as err:
             logger.error("Error reading data: {}".format(err))
             _fast_next = False
+            # Attempt a hardware reset of the RFM9x before calling
+            # _failed_reading_data().  If the error was caused by a SPI
+            # glitch the module may be in an inconsistent state and
+            # subsequent send() calls would produce corrupted packets or
+            # silent failures.  reset_radio() is best-effort: if it
+            # raises, the inner except swallows it and we fall through
+            # to the same behaviour as before.
+            try:
+                lora.reset_radio()
+                logger.info("LoRa reset after data error")
+            except Exception as reset_err:
+                logger.error("LoRa reset failed: {}".format(reset_err))
             _failed_reading_data(lora, logger)
             continue
 
