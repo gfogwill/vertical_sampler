@@ -28,6 +28,9 @@ FLOAT_FILLVAL        = -1e9
 _STR_LEN             = 10
 _MSG_TYPE_LEN        = 12
 
+# Integer struct format chars: fields with these formats must be int, not float.
+_INT_FMTS = frozenset("iIlL")
+
 # Valid msg_type values (max 12 chars incl. null padding)
 MSG_TELEMETRY     = "telemetry"   # 9 chars
 MSG_COMMAND_ACK   = "cmd_ack"     # 7 chars
@@ -58,6 +61,11 @@ def dict2bytes(d: dict) -> bytes:
                 INT_FILLVAL          if fmt == "i" else
                 FLOAT_FILLVAL
             )
+        elif fmt in _INT_FMTS:
+            # CircuitPython struct.pack does not coerce float->int.
+            # Cast explicitly so callers can pass floats for integer fields
+            # (e.g. elapsed_time = time.time() - start_time for gps_time).
+            tup.append(int(val))
         else:
             tup.append(val)
     return struct.pack(FORMAT, *tup)
