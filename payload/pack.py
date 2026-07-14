@@ -1,7 +1,7 @@
 import struct
 
 KEYS = [
-    ("msg_type",                    "8s"),
+    ("msg_type",                    "12s"),
     ("gps_time",                    "L"),
     ("gps_latitude",                "f"),
     ("gps_longitude",               "f"),
@@ -26,12 +26,12 @@ INT_FILLVAL          = -999999
 UNSIGNED_INT_FILLVAL = 4294967295
 FLOAT_FILLVAL        = -1e9
 _STR_LEN             = 10
-_MSG_TYPE_LEN        = 8
+_MSG_TYPE_LEN        = 12
 
-# Valid msg_type values
-MSG_TELEMETRY     = "telemetry"
-MSG_COMMAND_ACK   = "cmd_ack"
-MSG_COMMAND_ERROR = "cmd_err"
+# Valid msg_type values (max 12 chars incl. null padding)
+MSG_TELEMETRY     = "telemetry"   # 9 chars
+MSG_COMMAND_ACK   = "cmd_ack"     # 7 chars
+MSG_COMMAND_ERROR = "cmd_err"     # 7 chars
 
 
 def dict2bytes(d: dict) -> bytes:
