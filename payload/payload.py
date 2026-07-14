@@ -234,7 +234,6 @@ def _check_safety(pump, valve, bat_v, logger):
     """Check CPU temperature and battery. Cut pump and valve if critical."""
     cpu_temp = microcontroller.cpu.temperature
 
-    # Temperatura CPU
     if cpu_temp >= _TEMP_CRITICAL_C:
         logger.error(
             "CPU temp critical: {:.1f}C — cutting pump & valve".format(cpu_temp)
@@ -244,7 +243,6 @@ def _check_safety(pump, valve, bat_v, logger):
     elif cpu_temp >= _TEMP_WARN_C:
         logger.warning("CPU temp warning: {:.1f}C".format(cpu_temp))
 
-    # Batería
     if bat_v > 1.0:
         if bat_v <= _BAT_CUTOFF_V:
             logger.error(
@@ -301,17 +299,27 @@ def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat, flow_meter, 
     }
 
 
+def _send_with_type(lora, data, msg_type):
+    """Copy data dict, set msg_type, and send. Avoids {**dict} spread
+    which is not supported in CircuitPython."""
+    pkt = data.copy()
+    pkt["msg_type"] = msg_type
+    lora.send(pack.dict2bytes(pkt))
+
+
 def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
     try:
         msg_in = msg.decode().strip()
         cmd = msg_in.split()
         if not cmd:
             return
-        main_cmd, *sub_cmd = cmd
+        main_cmd = cmd[0]
+        sub_cmd = cmd[1:]
         if main_cmd == "pump":
             if len(sub_cmd) < 2:
                 raise ValueError("pump requires <location> <state>")
-            pump_loc, state = sub_cmd[0], sub_cmd[1]
+            pump_loc = sub_cmd[0]
+            state = sub_cmd[1]
             pump.set_state(pump_loc, state)
             data["pump_front_state"] = pump.get_front_state()
             data["pump_back_state"] = pump.get_back_state()
@@ -328,10 +336,10 @@ def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
         else:
             logger.warning("Unexpected command: {}".format(msg_in))
             return
-        lora.send(pack.dict2bytes({**data, "msg_type": "command_ack"}))
+        _send_with_type(lora, data, "cmd_ack")
     except Exception as err:
         logger.error("Error processing command: {}".format(err))
-        lora.send(pack.dict2bytes({**data, "msg_type": "command_error"}))
+        _send_with_type(lora, data, "cmd_err")
 
 
 def main_loop(lora, payload_id, logger):
@@ -355,8 +363,6 @@ def main_loop(lora, payload_id, logger):
     start_time = time.time()
     data = {}
 
-    # Heartbeat scheduler: first fire = offset, then every HEARTBEAT_INTERVAL_S.
-    # Uses time.monotonic() to avoid drift from time.time() corrections.
     _hb_offset = HEARTBEAT_OFFSETS.get(payload_id, 0)
     _next_heartbeat = time.monotonic() + _hb_offset
 
@@ -377,11 +383,10 @@ def main_loop(lora, payload_id, logger):
             _failed_reading_data(lora, logger)
             continue
 
-        # Automatic heartbeat: transmit last data packet if interval elapsed.
         now_mono = time.monotonic()
         if now_mono >= _next_heartbeat:
             try:
-                lora.send(pack.dict2bytes({**data, "msg_type": "telemetry"}))
+                _send_with_type(lora, data, "telemetry")
                 logger.info("Heartbeat sent")
             except Exception as err:
                 logger.error("Heartbeat send failed: {}".format(err))
