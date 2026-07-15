@@ -239,6 +239,18 @@ def _read_cmd_response(ser, timeout_s, accept_telemetry=False):
     return None
 
 
+def _enrich_data(data, payload, qnh_hpa=1013.25):
+    """Apply pressure offset and compute pressure altitude in-place."""
+    p = data.get("pressure_sensor_pressure")
+    if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
+        p_corrected = _apply_pressure_offset(payload, p)
+        data["pressure_sensor_pressure"] = p_corrected
+        data["_pressure_altitude"] = _pressure_altitude(p_corrected, qnh_hpa)
+    else:
+        data["_pressure_altitude"] = None
+    return data
+
+
 def relay_cmd(args):
     cmd = _build_cmd(args)
     is_data = (args.subcommand == "data")
@@ -254,6 +266,7 @@ def relay_cmd(args):
             if data is not None:
                 print(" OK" if data.get("msg_type") != _MSG_CMD_ERR else " ERROR")
                 if args.subcommand == "data":
+                    _enrich_data(data, args.payload)
                     pretty_print(data, payload_id=str(args.payload))
                 else:
                     print(json.dumps(data, indent=2))
