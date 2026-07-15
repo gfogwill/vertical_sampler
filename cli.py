@@ -77,6 +77,20 @@ _CTRL_KEYS = {
 }
 
 
+# Per-payload additive pressure offsets (hPa) calibrated against TSI 4100 reference
+_PRESSURE_OFFSET_HPA = {
+    Payload.MATOROVA:   +2.1,   # offset = P_TSI_4100 - P_sensor_crudo (medido en calibración)
+    Payload.KENTTAROVA: -1.9,
+}
+
+
+def _apply_pressure_offset(payload, pressure_hpa):
+    if pressure_hpa is None:
+        return None
+    offset = _PRESSURE_OFFSET_HPA.get(payload, 0.0)
+    return pressure_hpa + offset
+
+
 def _pressure_altitude(pressure_hpa, qnh_hpa):
     try:
         return 44330.0 * (1.0 - math.pow(pressure_hpa / qnh_hpa, 0.1903))
@@ -272,11 +286,14 @@ class PollWorker(threading.Thread):
         self.cmd_q = queue.Queue()
         self.result_q = queue.Queue()
 
-    def _enrich(self, d):
+    def _enrich(self, d, payload):
         p = d.get("pressure_sensor_pressure")
         if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
-            d["_pressure_altitude"] = _pressure_altitude(p, self.qnh)
+            p_corrected = _apply_pressure_offset(payload, p)
+            d["pressure_sensor_pressure_corrected"] = p_corrected
+            d["_pressure_altitude"] = _pressure_altitude(p_corrected, self.qnh)
         else:
+            d["pressure_sensor_pressure_corrected"] = None
             d["_pressure_altitude"] = None
         return d
 
@@ -296,18 +313,18 @@ class PollWorker(threading.Thread):
         d = _read_cmd_response(ser, timeout_s=6, accept_telemetry=True)
         if d is not None:
             d["_ts"] = time.time()
-            self._enrich(d)
+            self._enrich(d, payload)
             self._log(d)
         self.result_q.put((payload, d))
 
-    def _send_control(self, ser, cmd_bytes):
+    def _send_control(self, ser, cmd_bytes, payload):
         _drain_serial(ser, timeout_s=0.5)
         ser.write(cmd_bytes)
         ser.flush()
         d = _read_cmd_response(ser, timeout_s=8, accept_telemetry=True)
         if d is not None:
             d["_ts"] = time.time()
-            self._enrich(d)
+            self._enrich(d, payload)
             self._log(d)
         return d
 
@@ -324,7 +341,8 @@ class PollWorker(threading.Thread):
                     if msg_type not in (_MSG_TELEMETRY, ""):
                         return
                     d["_ts"] = time.time()
-                    self._enrich(d)
+                    # Heartbeats may omit a payload id; pass None so offset defaults to 0.0
+                    self._enrich(d, None)
                     self._log(d)
                     self.result_q.put((None, d))
                 except Exception:
@@ -353,7 +371,7 @@ class PollWorker(threading.Thread):
                         self._poll_one(ser, item[1])
                     elif isinstance(item, tuple) and item[0] == _CMD_CONTROL:
                         _, payload, cmd_bytes = item
-                        d = self._send_control(ser, cmd_bytes)
+                        d = self._send_control(ser, cmd_bytes, payload)
                         self.result_q.put((payload, d))
                     continue
                 except queue.Empty:
@@ -565,7 +583,7 @@ def _run_monitor(payloads, qnh, log_file):
         curses.wrapper(draw)
     except Exception as exc:
         worker.cmd_q.put(_CMD_QUIT)
-        print("[monitor] curses error ({}), falling back to plain poll.".format(exc))
+        print("[monitor] curses error ({}}), falling back to plain poll.".format(exc))
         worker2 = PollWorker(payloads, qnh, log_file)
         worker2.start()
         worker2.cmd_q.put(_CMD_POLL_ALL)
