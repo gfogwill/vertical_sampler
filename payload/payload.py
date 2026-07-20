@@ -83,6 +83,22 @@ def _format_rtc_time():
     )
 
 
+def _gps_time_to_epoch(time_):
+    """Convert a GPS UTC struct_time to a Unix epoch integer.
+
+    CircuitPython's time.mktime() treats the struct_time as UTC on the
+    Pico (no TZ/DST adjustment), which matches the UTC origin of
+    adafruit_gps timestamp_utc.  Returns None if time_ is None or the
+    conversion raises.
+    """
+    if time_ is None:
+        return None
+    try:
+        return int(time.mktime(time_))
+    except Exception:
+        return None
+
+
 class Pump:
     def __init__(self, logger):
         time.sleep(0.2)
@@ -296,18 +312,18 @@ def _failed_reading_data(lora, logger):
 
 def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat,
                   flow_meter, pump, valve, lora, start_time, fast_gps=False):
-    elapsed_time = time.time() - start_time
     if fast_gps:
         lat, lon, alt, time_ = gps.lat_lon_alt_time_fast()
     else:
         lat, lon, alt, time_ = gps.lat_lon_alt_time()
+    gps_epoch = _gps_time_to_epoch(time_)
     rh_humidity, rh_temperature = rh_sensor.humidity_and_temperature()
     bat_v = bat.voltage()
     cpu_temp = microcontroller.cpu.temperature
     return {
         "payload_id": payload_id,
         "rtc_time": _format_rtc_time(),
-        "gps_time": elapsed_time,
+        "gps_time": gps_epoch,
         "gps_latitude": lat,
         "gps_longitude": lon,
         "gps_altitude": alt,
