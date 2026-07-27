@@ -142,19 +142,26 @@ class Valve:
 
     def get_state(self):
         return int(self.valve.value)
-
-
+        
 class FlowMeter:
-    def __init__(self, logger):
+    def __init__(self, logger, oversample_n=16, sample_delay_s=0.001):
         time.sleep(0.2)
         self.flow_meter = analogio.AnalogIn(BOARD_GP_FLOWMETER)
+        self._n = oversample_n
+        self._delay = sample_delay_s
         logger.info("FlowMeter initialized")
 
     def flow(self):
-        v_adc = self.flow_meter.value * 3.3 / 65535
+        total = 0
+        for _ in range(self._n):
+            total += self.flow_meter.value
+            if self._delay:
+                time.sleep(self._delay)
+        raw_avg = total / self._n
+
+        v_adc = raw_avg * 3.3 / 65535
         v_sensor = v_adc / _FLOW_DIVIDER_RATIO
         return max(0.0, (v_sensor / _FLOW_FULL_SCALE_V) * _FLOW_FULL_SCALE_LMIN - _FLOW_OFFSET_LMIN)
-
 
 class Sht85Sensor:
     def __init__(self, logger, i2c_bus):
