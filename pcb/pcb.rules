@@ -1,0 +1,60 @@
+
+(rules PCB pcb.dsn
+  (snap_angle 
+    fortyfive_degree
+  )
+  (rule
+    (width 200.0)
+    (clearance 203.2)
+    (clearance 100.0 (type smd_to_turn_gap))
+    (clearance 50.8 (type smd))
+    (clearance 203.2 (type "kicad_default"))
+  )
+  (padstack "Via[0-1]_600:300_um"
+    (shape
+      (circle F.Cu 600.0 0.0 0.0)
+    )
+    (shape
+      (circle B.Cu 600.0 0.0 0.0)
+    )
+    (attach off)
+  )
+  (via 
+    "Via[0-1]_600:300_um" "Via[0-1]_600:300_um" default
+  )
+  (via 
+    "Via[0-1]_600:300_um-kicad_default" "Via[0-1]_600:300_um" "kicad_default"
+  )
+  (via_rule
+    default "Via[0-1]_600:300_um"
+  )
+  (via_rule
+    "kicad_default" "Via[0-1]_600:300_um-kicad_default"
+  )
+  (class default
+    (clearance_class default)
+    (via_rule default)
+    (rule
+      (width 200.0)
+    )
+    (circuit 
+      (use_layer F.Cu B.Cu)
+    )
+  )
+  (class "kicad_default"
+    "unconnected-(A1-GPIO16-Pad21)" "unconnected-(A1-GPIO15-Pad20)" "unconnected-(A1-GPIO11-Pad15)" "unconnected-(A1-GPIO22-Pad29)" "unconnected-(A1-GPIO26_ADC0-Pad31)" "unconnected-(A1-3V3_EN-Pad37)" "unconnected-(A1-GPIO12-Pad16)" "unconnected-(A1-GPIO10-Pad14)"
+    "unconnected-(A1-RUN-Pad30)" "unconnected-(A1-GPIO7-Pad10)" "unconnected-(A1-GPIO13-Pad17)" "unconnected-(A1-GPIO6-Pad9)" "unconnected-(A1-VBUS-Pad40)" "unconnected-(U1-G5-PadJP1_5)" "unconnected-(U1-G4-PadJP1_4)" "unconnected-(U1-G3-PadJP1_3)"
+    "unconnected-(U1-G0-PadJP3_4)" "unconnected-(U1-G2-PadJP1_2)" "unconnected-(U1-G1-PadJP1_1)" "unconnected-(U2-DET-Pad9)" "unconnected-(U2-DAT1-Pad7)" "unconnected-(U2-DAT2-Pad8)" "/I2C_SDA" "/SPI_MOSI"
+    "/GPS_RX" "/FLOW_ADC" "/I2C_SCL" /VALVE "/LORA_CS" "/SPI_SCK" "/LORA_RST" "/PUMP_FRONT"
+    "/SD_CS" "/PUMP_BACK" "/GPS_TX" "/SPI_MISO" /3.3V /3.3Vin "Net-(D1-A)" GND
+    "/FLOW_RAW" /5V "/OPC_CS" "/BAT_VOLT_ADC"
+    (clearance_class "kicad_default")
+    (via_rule "kicad_default")
+    (rule
+      (width 200.0)
+    )
+    (circuit 
+      (use_layer F.Cu B.Cu)
+    )
+  )
+)
