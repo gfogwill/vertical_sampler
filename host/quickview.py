@@ -3,8 +3,8 @@
 QuickView: live ground control dashboard for JSONL backups written by cli.py --log-file.
 
 Usage:
-    python tools/quickview.py --log-file ground_dump.jsonl
-    python tools/quickview.py -f ground_dump.jsonl --qnh 1015.7 --max-points 600
+    python host/quickview.py --log-file ground_dump.jsonl
+    python host/quickview.py -f ground_dump.jsonl --qnh 1015.7 --max-points 600
 
 Supported JSON line formats:
  - {"pc_time": "...", "payload": "matorova", "data": {...}}   (wrapped)
