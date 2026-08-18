@@ -6,31 +6,26 @@ import select
 import sys
 import time
 import busio
-import board
 import led
 import pack
-import address
+import config
 from lora import LoRa
 
-BOARD_GP_LORA_SCK = board.GP2
-BOARD_GP_LORA_TX  = board.GP3
-BOARD_GP_LORA_RX  = board.GP4
-
-spi = busio.SPI(BOARD_GP_LORA_SCK, MOSI=BOARD_GP_LORA_TX, MISO=BOARD_GP_LORA_RX)
+spi = busio.SPI(config.SPI_SCK, MOSI=config.SPI_MOSI, MISO=config.SPI_MISO)
 
 # Default destination = ground itself so the LoRa object is always valid.
 # set_destination() overrides this before every send.
 lora = LoRa(
     spi=spi,
-    node=address.ground_rfm_address,
-    destination=address.ground_rfm_address,
+    node=config.GROUND_RFM_ADDRESS,
+    destination=config.GROUND_RFM_ADDRESS,
 )
 
 POLL = select.poll()
 POLL.register(sys.stdin, 1)
 
 # Expected wire sizes — used for a fast pre-check before struct.unpack.
-_WIRE_SIZE   = getattr(pack, "WIRE_SIZE",   None)
+_WIRE_SIZE = getattr(pack, "WIRE_SIZE", None)
 _LEGACY_SIZE = getattr(pack, "LEGACY_SIZE", None)
 
 
@@ -49,7 +44,7 @@ def _drain_lora(timeout=0.2, max_reads=8):
 
 
 def _parse_packet(msg):
-    """Try to deserialize a LoRa payload.  Returns dict or None.
+    """Try to deserialize a LoRa payload. Returns dict or None.
 
     Prints a one-line diagnostic to stdout (visible in Thonny) if the
     packet fails to parse, so FORMAT mismatches are no longer silent.
@@ -80,9 +75,9 @@ def _process_command(cmd_str):
 
     payload_id, *cmd = parts
     if payload_id == "kenttarova":
-        lora.set_destination(address.kenttarova_rfm_address)
+        lora.set_destination(config.KENTTAROVA_RFM_ADDRESS)
     elif payload_id == "matorova":
-        lora.set_destination(address.matorova_rfm_address)
+        lora.set_destination(config.MATOROVA_RFM_ADDRESS)
     else:
         raise UnexpectedCommand("unknown payload: " + payload_id)
 
