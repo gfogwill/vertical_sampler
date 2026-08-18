@@ -20,21 +20,21 @@ download-nuke:
 
 # --- Deploy targets ---
 
-update-kenttarova: update-payload
-	cp payloads/kenttarova/main.py $(CIRCUITPY_PATH)/main.py
+update-kenttarova: update-firmware
+	cp firmware/kenttarova_main.py $(CIRCUITPY_PATH)/main.py
 	@echo "Deployed kenttarova to $(CIRCUITPY_PATH)"
 
-update-matorova: update-payload
-	cp payloads/matorova/main.py $(CIRCUITPY_PATH)/main.py
+update-matorova: update-firmware
+	cp firmware/matorova_main.py $(CIRCUITPY_PATH)/main.py
 	@echo "Deployed matorova to $(CIRCUITPY_PATH)"
 
-update-ground: update-payload
-	cp ground/main.py $(CIRCUITPY_PATH)/main.py
+update-ground: update-firmware
+	cp firmware/ground_main.py $(CIRCUITPY_PATH)/main.py
 	@echo "Deployed ground station to $(CIRCUITPY_PATH)"
 
-update-payload:
+update-firmware:
 	rm -f $(CIRCUITPY_PATH)/code.py
-	cp payload/*.py $(CIRCUITPY_PATH)/
+	cp firmware/common/*.py $(CIRCUITPY_PATH)/
 
 # --- Utilities ---
 
