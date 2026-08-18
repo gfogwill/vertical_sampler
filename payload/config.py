@@ -25,6 +25,11 @@ FLOWMETER = board.GP28
 # because the CircuitPython driver requires a DigitalInOut reset argument.
 LORA_RESET_DUMMY = board.GP14
 
+# LoRa node addresses
+GROUND_RFM_ADDRESS = 0x01
+KENTTAROVA_RFM_ADDRESS = 0x02
+MATOROVA_RFM_ADDRESS = 0x03
+
 FLOW_DIVIDER_RATIO = 32.6 / (10.0 + 32.6)
 FLOW_FULL_SCALE_V = 4.0
 FLOW_FULL_SCALE_LMIN = 20.0
