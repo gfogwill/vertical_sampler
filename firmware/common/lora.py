@@ -1,4 +1,4 @@
-from firmware.common import adafruit_rfm9x
+import adafruit_rfm9x
 import digitalio
 import time
 import config

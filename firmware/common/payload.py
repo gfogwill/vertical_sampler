@@ -3,7 +3,7 @@ import time
 import rtc
 import microcontroller
 import watchdog
-from firmware.common import adafruit_gps, pack
+import adafruit_gps, pack
 import analogio
 import board
 import busio

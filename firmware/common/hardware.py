@@ -6,7 +6,7 @@ refactor step will import these classes from payload.py after on-device tests.
 
 import time
 
-from firmware.common import adafruit_gps
+import adafruit_gps
 import analogio
 import busio
 import digitalio
