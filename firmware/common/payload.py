@@ -3,16 +3,14 @@ import time
 import rtc
 import microcontroller
 import watchdog
-import adafruit_gps
+from firmware.common import adafruit_gps, pack
 import analogio
 import board
 import busio
 import digitalio
 import led
-import pack
 
 import config
-from lora import LoRa
 from pressure_sensor import PressureSensor
 
 _CMD_MIN_LEN = 4

@@ -78,8 +78,8 @@ make install-lora-deps
 ### 3. Deploy a payload
 
 ```bash
-make update-kenttarova   # deploys payload/ + payloads/kenttarova/main.py
-make update-matorova    # deploys payload/ + payloads/matorova/main.py
+make update-kenttarova   # deploys payload/ + payloads/kenttarova/kenttarova_main.py
+make update-matorova    # deploys payload/ + payloads/matorova/kenttarova_main.py
 ```
 
 ### 4. Deploy ground station
