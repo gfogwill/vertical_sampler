@@ -10,46 +10,14 @@ import busio
 import digitalio
 import led
 import pack
+
+import config
 from lora import LoRa
 from pressure_sensor import PressureSensor
 
-BOARD_GP_RH_SDA = board.GP8
-BOARD_GP_RH_SCL = board.GP9
-BOARD_GP_GPS_UART_TX = board.GP0
-BOARD_GP_GPS_UART_RX = board.GP1
-BOARD_GP_ELECTROVALVE = board.GP19
-BOARD_GP_PUMP_FRONT = board.GP20
-BOARD_GP_PUMP_BACK = board.GP21
-BOARD_GP_BATTERY_MONITOR = board.GP27
-BOARD_GP_FLOWMETER = board.GP28
-
-_FLOW_DIVIDER_RATIO = 32.6 / (10.0 + 32.6)
-_FLOW_FULL_SCALE_V = 4.0
-_FLOW_FULL_SCALE_LMIN = 20.0
-_FLOW_OFFSET_LMIN = 0.25
-
-_BAT_CAL_FACTOR = 10.15
-_BAT_WARN_V = 19.8
-_BAT_CUTOFF_V = 18.6
-
-_TEMP_WARN_C = 45.0
-_TEMP_CRITICAL_C = 55.0
-
-_WATCHDOG_TIMEOUT_S = 30
-
-HEARTBEAT_INTERVAL_S = 60
-HEARTBEAT_OFFSETS = {
-    "matorova":   0,
-    "kenttarova": 30,
-}
-
-# Minimum byte length for a plausible command.  The shortest valid
-# command is "data" (4 bytes via LoRa, sent as "<payload> data\n" so
-# what the payload sees after stripping the address header is "data").
-# Anything shorter is garbage from a SPI glitch.
 _CMD_MIN_LEN = 4
 
-i2c_bus = busio.I2C(scl=BOARD_GP_RH_SCL, sda=BOARD_GP_RH_SDA)
+i2c_bus = busio.I2C(scl=config.I2C_SCL, sda=config.I2C_SDA)
 _rtc = rtc.RTC()
 _rtc_synced = False
 _wdt = None
@@ -59,7 +27,7 @@ def _init_watchdog():
     global _wdt
     try:
         _wdt = microcontroller.watchdog
-        _wdt.timeout = _WATCHDOG_TIMEOUT_S
+        _wdt.timeout = config.WATCHDOG_TIMEOUT_S
         _wdt.mode = watchdog.WatchDogMode.RESET
         _wdt.feed()
     except Exception as e:
@@ -84,13 +52,6 @@ def _format_rtc_time():
 
 
 def _gps_time_to_epoch(time_):
-    """Convert a GPS UTC struct_time to a Unix epoch integer.
-
-    CircuitPython's time.mktime() treats the struct_time as UTC on the
-    Pico (no TZ/DST adjustment), which matches the UTC origin of
-    adafruit_gps timestamp_utc.  Returns None if time_ is None or the
-    conversion raises.
-    """
     if time_ is None:
         return None
     try:
@@ -102,10 +63,10 @@ def _gps_time_to_epoch(time_):
 class Pump:
     def __init__(self, logger):
         time.sleep(0.2)
-        self.pump_front = digitalio.DigitalInOut(BOARD_GP_PUMP_FRONT)
+        self.pump_front = digitalio.DigitalInOut(config.PUMP_FRONT)
         self.pump_front.switch_to_output()
         time.sleep(0.2)
-        self.pump_back = digitalio.DigitalInOut(BOARD_GP_PUMP_BACK)
+        self.pump_back = digitalio.DigitalInOut(config.PUMP_BACK)
         self.pump_back.switch_to_output()
         logger.info("Pump initialized")
 
@@ -133,7 +94,7 @@ class Pump:
 class Valve:
     def __init__(self, logger):
         time.sleep(0.2)
-        self.valve = digitalio.DigitalInOut(BOARD_GP_ELECTROVALVE)
+        self.valve = digitalio.DigitalInOut(config.ELECTROVALVE)
         self.valve.switch_to_output()
         logger.info("Valve initialized")
 
@@ -142,11 +103,12 @@ class Valve:
 
     def get_state(self):
         return int(self.valve.value)
-        
+
+
 class FlowMeter:
     def __init__(self, logger, oversample_n=16, sample_delay_s=0.001):
         time.sleep(0.2)
-        self.flow_meter = analogio.AnalogIn(BOARD_GP_FLOWMETER)
+        self.flow_meter = analogio.AnalogIn(config.FLOWMETER)
         self._n = oversample_n
         self._delay = sample_delay_s
         logger.info("FlowMeter initialized")
@@ -160,8 +122,9 @@ class FlowMeter:
         raw_avg = total / self._n
 
         v_adc = raw_avg * 3.3 / 65535
-        v_sensor = v_adc / _FLOW_DIVIDER_RATIO
-        return max(0.0, (v_sensor / _FLOW_FULL_SCALE_V) * _FLOW_FULL_SCALE_LMIN - _FLOW_OFFSET_LMIN)
+        v_sensor = v_adc / config.FLOW_DIVIDER_RATIO
+        return max(0.0, (v_sensor / config.FLOW_FULL_SCALE_V) * config.FLOW_FULL_SCALE_LMIN - config.FLOW_OFFSET_LMIN)
+
 
 class Sht85Sensor:
     def __init__(self, logger, i2c_bus):
@@ -194,19 +157,19 @@ class Sht85Sensor:
 
 class Battery:
     def __init__(self, logger):
-        self.v = analogio.AnalogIn(BOARD_GP_BATTERY_MONITOR)
+        self.v = analogio.AnalogIn(config.BATTERY_MONITOR)
         logger.info("Battery initialized")
 
     def voltage(self):
         raw = self.v.value * 3.3 / 65535
-        return _BAT_CAL_FACTOR * raw
+        return config.BATTERY_CAL_FACTOR * raw
 
 
 class GPS:
     def __init__(self, logger):
         self.logger = logger
         self.sensor = adafruit_gps.GPS(
-            busio.UART(BOARD_GP_GPS_UART_TX, BOARD_GP_GPS_UART_RX, baudrate=9600)
+            busio.UART(config.GPS_UART_TX, config.GPS_UART_RX, baudrate=9600)
         )
         self.sensor.send_command(b"PMTK314,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0")
         self.sensor.send_command(b"PMTK220,1000")
@@ -217,7 +180,6 @@ class GPS:
         logger.info("GPS initialized")
 
     def lat_lon_alt_time(self, max_attempts=5, timeout=10):
-        """Full GPS poll: waits up to timeout/max_attempts for a fix."""
         global _rtc_synced
         gps = self.sensor
         gps.update()
@@ -260,11 +222,8 @@ class GPS:
         return None, None, None, None
 
     def lat_lon_alt_time_fast(self):
-        """Non-blocking GPS poll: pumps NMEA buffer once, returns cached
-        fix if still valid, None tuple if no fix.  Use on the command
-        path where blocking for 5 s would make the ACK arrive too late."""
         gps = self.sensor
-        gps.update()  # drain NMEA buffer, ~0 ms
+        gps.update()
         if gps.has_fix:
             lat = gps.latitude
             lon = gps.longitude
@@ -276,7 +235,6 @@ class GPS:
                 self._last_alt = alt
                 self._last_time = time_
                 return lat, lon, alt, time_
-        # Return last known fix if available
         if self._last_lat is not None:
             return self._last_lat, self._last_lon, self._last_alt, self._last_time
         return None, None, None, None
@@ -284,18 +242,18 @@ class GPS:
 
 def _check_safety(pump, valve, bat_v, logger):
     cpu_temp = microcontroller.cpu.temperature
-    if cpu_temp >= _TEMP_CRITICAL_C:
+    if cpu_temp >= config.CPU_TEMP_CRITICAL_C:
         logger.error("CPU temp critical: {:.1f}C - cutting pump & valve".format(cpu_temp))
         pump.emergency_off()
         valve.set_state("off")
-    elif cpu_temp >= _TEMP_WARN_C:
+    elif cpu_temp >= config.CPU_TEMP_WARN_C:
         logger.warning("CPU temp warning: {:.1f}C".format(cpu_temp))
     if bat_v > 1.0:
-        if bat_v <= _BAT_CUTOFF_V:
+        if bat_v <= config.BATTERY_CUTOFF_V:
             logger.error("Battery critical: {:.2f}V - cutting pump & valve".format(bat_v))
             pump.emergency_off()
             valve.set_state("off")
-        elif bat_v <= _BAT_WARN_V:
+        elif bat_v <= config.BATTERY_WARN_V:
             logger.warning("Battery low: {:.2f}V".format(bat_v))
 
 
@@ -349,18 +307,12 @@ def _collect_data(payload_id, gps, rh_sensor, pressure_sensor, bat,
 
 
 def _send_with_type(lora, data, msg_type):
-    """Copy data dict, set msg_type, and send."""
     pkt = data.copy()
     pkt["msg_type"] = msg_type
     lora.send(pack.dict2bytes(pkt))
 
 
 def _is_printable_ascii(b):
-    """Return True if every byte in b is a printable ASCII character
-    (0x20-0x7E) or a common whitespace byte (tab, newline, CR).
-    Used as a cheap pre-filter to discard SPI-glitch garbage before
-    attempting to parse a received LoRa frame as a command string.
-    """
     for byte in b:
         if not (0x20 <= byte <= 0x7E or byte in (0x09, 0x0A, 0x0D)):
             return False
@@ -368,14 +320,9 @@ def _is_printable_ascii(b):
 
 
 def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
-    # --- garbage filter ---------------------------------------------------
-    # After a SPI glitch the RFM9x can return spurious short packets
-    # (register echoes, FIFO residue).  Discard anything that is too
-    # short or contains non-printable bytes before touching cmd parsing.
     if len(msg) < _CMD_MIN_LEN or not _is_printable_ascii(msg):
         logger.debug("Discarding garbage frame ({} bytes)".format(len(msg)))
         return
-    # ----------------------------------------------------------------------
     try:
         msg_in = msg.decode().strip()
         cmd = msg_in.split()
@@ -385,7 +332,6 @@ def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
         sub_cmd = cmd[1:]
 
         if not data:
-            # data dict not yet populated (first cycle still running)
             logger.warning("Command arrived before first data collection; sending fill-value ack")
 
         if main_cmd == "pump":
@@ -422,7 +368,7 @@ def _handle_command(msg, data, pump, valve, lora, payload_id, logger):
 def main_loop(lora, payload_id, logger):
     logger.info("Starting main loop")
     _init_watchdog()
-    logger.info("Watchdog armed ({} s timeout)".format(_WATCHDOG_TIMEOUT_S))
+    logger.info("Watchdog armed ({} s timeout)".format(config.WATCHDOG_TIMEOUT_S))
 
     try:
         rh_sensor = Sht85Sensor(logger, i2c_bus)
@@ -441,7 +387,7 @@ def main_loop(lora, payload_id, logger):
     data = {}
     _fast_next = False
 
-    _hb_offset = HEARTBEAT_OFFSETS.get(payload_id, 0)
+    _hb_offset = config.HEARTBEAT_OFFSETS.get(payload_id, 0)
     _next_heartbeat = time.monotonic() + _hb_offset
 
     while True:
@@ -477,7 +423,7 @@ def main_loop(lora, payload_id, logger):
                 logger.info("Heartbeat sent")
             except Exception as err:
                 logger.error("Heartbeat send failed: {}".format(err))
-            _next_heartbeat = now_mono + HEARTBEAT_INTERVAL_S
+            _next_heartbeat = now_mono + config.HEARTBEAT_INTERVAL_S
 
         _feed_watchdog()
         led.blink(3)
