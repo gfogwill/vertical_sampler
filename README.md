@@ -1,61 +1,76 @@
 # Vertical Sampler
 
-Firmware and ground station software for a balloon-borne vertical air sampler for Ice Nucleating Particle (INP) collection. The system uses two **Raspberry Pi Pico W** boards running **CircuitPython**, communicating over **LoRa (868 MHz)**.
+Firmware, hardware and host software for a balloon-borne vertical air sampler for Ice Nucleating Particle (INP) collection.
+
+Payload and ground-station Raspberry Pi Pico W boards run **CircuitPython** and communicate over **LoRa at 868 MHz**. The system supports two payload identities: `kenttarova` and `matorova`.
 
 ## System Overview
 
-```
+```text
 ┌─────────────────────────┐        LoRa 868 MHz         ┌─────────────────────────┐
 │        PAYLOAD          │◄───────────────────────────►│    GROUND STATION       │
 │  Raspberry Pi Pico W    │                             │  Raspberry Pi Pico W    │
 │                         │                             │                         │
 │  - GPS (+ RTC sync)     │                             │  - Receives telemetry   │
-│  - Pressure sensor      │                             │  - Relays to PC via USB │
-│  - RH/Temp sensor       │                             │  - Forwards commands    │
-│  - 2x Pumps             │                             └─────────────────────────┘
-│  - Electrovalve         │                                         │
-│  - SD card logging      │                                    USB Serial
-│  - Battery monitor      │                                         │
-│  - Flow meter           │                             ┌─────────────────────────┐
-│  - Watchdog timer       │                             │    Ground PC (cli.py)   │
-└─────────────────────────┘                             │  Python 3 + pyserial    │
+│  - SHT85 RH/temp sensor │                             │  - Relays to PC via USB │
+│  - LPS25H pressure      │                             │  - Forwards commands    │
+│  - Pumps + electrovalve │                             └─────────────────────────┘
+│  - SD logging           │                                         │
+│  - Battery + flow meter │                                    USB Serial
+│  - Watchdog             │                                         │
+└─────────────────────────┘                             ┌─────────────────────────┐
+                                                        │       Host computer     │
+                                                        │ host/cli.py             │
+                                                        │ host/quickview.py       │
                                                         └─────────────────────────┘
 ```
 
 ## Repository Structure
 
-```
+```text
 vertical_sampler/
-├── payload/                  # CircuitPython code deployed to payload units
-│   ├── address.py            # LoRa node addresses
-│   ├── led.py                # LED blink helpers
-│   ├── logging.py            # Logger class (writes to SD card + console)
-│   ├── lora.py               # LoRa wrapper (adafruit_rfm9x)
-│   ├── pack.py               # Binary packing for LoRa telemetry
-│   ├── payload.py            # Main loop, sensors, actuators, safety checks
-│   ├── pressure_sensor.py    # LPS25H I2C driver
-│   └── sdcard.py             # SD card mount + JSONL data + log file
-├── payloads/
-│   ├── kenttarova/
-│   │   └── main.py           # Entry point for kenttarova unit
-│   └── matorova/
-│       └── main.py           # Entry point for matorova unit
-├── ground/
-│   └── main.py               # Ground station firmware
-├── cli.py                    # Python 3 CLI for sending commands from PC
-├── Makefile                  # Deploy helpers
-└── docs/
-    └── TROUBLESHOOTING.md
+├── firmware/                    # CircuitPython code deployed to Pico boards
+│   ├── common/                  # Copied flat to every CIRCUITPY drive
+│   │   ├── config.py            # PCB v1 GPIOs, calibration, limits, LoRa addresses
+│   │   ├── payload.py           # Active payload drivers and mission loop
+│   │   ├── lora.py              # RFM9x wrapper
+│   │   ├── pressure_sensor.py   # LPS25H driver
+│   │   ├── sdcard.py            # SD mount, JSONL data and log writes
+│   │   ├── logging.py
+│   │   ├── pack.py              # Binary LoRa telemetry format
+│   │   ├── led.py
+│   │   ├── adafruit_gps.py      # Vendored CircuitPython dependency
+│   │   └── adafruit_rfm9x.py    # Vendored CircuitPython dependency
+│   ├── kenttarova_main.py       # kenttarova payload entry point
+│   ├── matorova_main.py         # matorova payload entry point
+│   └── ground_main.py           # Ground-station entry point
+├── host/                        # Python 3 programs running on the control PC
+│   ├── cli.py
+│   └── quickview.py
+├── pcb/                         # KiCad PCB v1 project
+├── docs/
+│   └── TROUBLESHOOTING.md
+├── Makefile
+└── README.md
 ```
 
-## Payloads
+`firmware/common/` is copied as flat modules to the root of `CIRCUITPY`. CircuitPython imports therefore remain simple:
 
-There are two payload units. Each has its own `main.py` with a unique `PAYLOAD_ID` and LoRa address. All other code (`payload/`) is shared.
+```python
+import config
+import lora
+import pack
+```
 
-| Payload ID   | LoRa node address               |
-|--------------|---------------------------------|
-| `kenttarova` | `kenttarova_rfm_address` (0x02) |
-| `matorova`   | `matorova_rfm_address` (0x03)   |
+## Payload Identities
+
+| Unit | LoRa node address | Entry point |
+|---|---:|---|
+| Ground station | `0x47` | `firmware/ground_main.py` |
+| kenttarova | `0x71` | `firmware/kenttarova_main.py` |
+| matorova | `0x93` | `firmware/matorova_main.py` |
+
+Addresses, GPIO assignments, calibration constants and safety limits are defined centrally in `firmware/common/config.py`.
 
 ## Quick Start
 
@@ -63,133 +78,136 @@ There are two payload units. Each has its own `main.py` with a unique `PAYLOAD_I
 
 ```bash
 make download-circuitpython-image
-# Then copy the .uf2 to the Pico W while in BOOTSEL mode
 ```
+
+Copy the resulting `.uf2` to the Pico W while it is in BOOTSEL mode.
 
 ### 2. Install dependencies
 
+The repository vendors `adafruit_gps.py` and `adafruit_rfm9x.py`. Install the remaining required CircuitPython libraries in the Pico `lib/` directory, including the dependencies required by the RFM9x driver such as `adafruit_bus_device`.
+
+### 3. Deploy firmware
+
+Set the CircuitPython mount point if needed:
+
 ```bash
-make install-lora-deps
-# Packages needed (install via Thonny or circup):
-#   adafruit-circuitpython-rfm9x
-#   adafruit-circuitpython-gps
+export CIRCUITPY_PATH=/media/$USER/CIRCUITPY
 ```
 
-### 3. Deploy a payload
+Deploy the required device image:
 
 ```bash
-make update-kenttarova   # deploys payload/ + payloads/kenttarova/kenttarova_main.py
-make update-matorova    # deploys payload/ + payloads/matorova/kenttarova_main.py
-```
-
-### 4. Deploy ground station
-
-```bash
+make update-kenttarova
+make update-matorova
 make update-ground
 ```
 
-### 5. Send commands from PC
+Each target:
+
+1. Removes stale `code.py`.
+2. Copies all `firmware/common/*.py` modules to the Pico.
+3. Copies the selected entry point as `main.py`.
+
+### 4. Control a payload
+
+Run commands from the host computer:
 
 ```bash
-python cli.py kenttarova pump front on
-python cli.py kenttarova pump back off
-python cli.py kenttarova valve on
-python cli.py kenttarova data
-python cli.py matorova pump front on
+python host/cli.py kenttarova data
+python host/cli.py kenttarova pump front on
+python host/cli.py kenttarova pump back off
+python host/cli.py kenttarova valve on
+python host/cli.py matorova data
 ```
 
-## Data Format
+`host/quickview.py` is available for local data inspection and visualization.
 
-Each sample is stored as a JSON line in `/sd/<payload_id>_001.jsonl` (auto-incremented per boot). Fields:
+## Telemetry Format
+
+Each payload sample is logged as JSONL when an SD card is available and sent over LoRa as a packed binary packet defined in `firmware/common/pack.py`.
 
 | Field | Type | Description |
 |---|---|---|
-| `payload_id` | str | `"kenttarova"` or `"matorova"` |
-| `rtc_time` | str | ISO 8601 timestamp from onboard RTC (`2020-01-01T...` until GPS syncs) |
-| `gps_time` | float | Elapsed seconds since boot |
-| `gps_latitude` | float\|null | Degrees (null if no fix) |
-| `gps_longitude` | float\|null | Degrees (null if no fix) |
-| `gps_altitude` | float\|null | Meters (null if no fix) |
-| `rh_sensor_humidity` | float | % RH |
-| `rh_sensor_temperature` | float | °C |
-| `pressure_sensor_pressure` | float | mbar |
-| `pressure_sensor_temperature` | float | °C |
-| `battery_voltage` | float | Volts (6S Li-ion, calibrated) |
-| `cpu_temperature` | float | Pico W internal temperature (°C) |
-| `flow` | float | Flow meter (Std L/min) |
-| `rssi` | int | LoRa RSSI |
-| `pump_front_state` | int | 0/1 |
-| `pump_back_state` | int | 0/1 |
-| `valve_state` | int | 0/1 |
+| `msg_type` | str | `telemetry`, `cmd_ack` or `cmd_err` |
+| `payload_id` | str | `kenttarova` or `matorova` |
+| `rtc_time` | str | RTC timestamp in ISO 8601 format |
+| `gps_time` | uint32/null | GPS UTC Unix epoch |
+| `gps_latitude` | float/null | Degrees |
+| `gps_longitude` | float/null | Degrees |
+| `gps_altitude` | float/null | Metres |
+| `rh_sensor_humidity` | float | Relative humidity, % |
+| `rh_sensor_temperature` | float | Temperature, °C |
+| `pressure_sensor_pressure` | float | Pressure, mbar |
+| `pressure_sensor_temperature` | float | Temperature, °C |
+| `battery_voltage` | float | Calibrated 6S battery voltage |
+| `cpu_temperature` | float | Pico internal temperature, °C |
+| `flow` | float | Standard L/min |
+| `rssi` | int | Last received LoRa RSSI |
+| `pump_front_state` | int | 0 or 1 |
+| `pump_back_state` | int | 0 or 1 |
+| `valve_state` | int | 0 or 1 |
 
-> **RTC sync:** The first time the GPS acquires a fix, the onboard RTC is synced to GPS UTC time. All subsequent `rtc_time` values will be real UTC timestamps even if the GPS later loses fix.
+> **RTC synchronization:** on the first valid GPS fix, the payload sets the onboard RTC to GPS UTC. Subsequent `rtc_time` values remain valid even if the GPS temporarily loses its fix.
 
-## SD Card Logging
+## SD Logging
 
-Two files are created per session (auto-incremented, never overwritten):
+The SD-card handler writes:
 
 | File | Content |
 |---|---|
-| `/sd/<id>_log.txt` | Human-readable log: `YYYY-MM-DD HH:MM:SS - LEVEL - module - message` |
-| `/sd/<id>_001.jsonl` | One JSON object per line, one per sample cycle |
+| `/sd/<payload_id>_log.txt` | Human-readable events and diagnostics |
+| `/sd/<payload_id>_NNN.jsonl` | One JSON object per sample cycle |
 
-- The SD card uses SPI (GP2/GP3/GP4) with CS on GP18.
-- **Graceful degradation:** if the SD card is absent or fails mid-flight, the system continues running and sending data over LoRa — it does not crash.
-- To inspect SD contents from the Thonny REPL:
-
-```python
-import os, storage, board, busio, sdcardio
-spi = busio.SPI(board.GP2, MOSI=board.GP3, MISO=board.GP4)
-sdcard = sdcardio.SDCard(spi, board.GP18)
-vfs = storage.VfsFat(sdcard)
-storage.mount(vfs, "/sd")
-print(os.listdir("/sd"))
-with open("/sd/matorova_001.jsonl") as f:
-    print(f.read())
-```
+If the SD card is unavailable or fails while operating, the payload continues running and transmitting telemetry over LoRa. Logging degrades to the serial console instead of stopping the mission.
 
 ## Safety Features
 
-### Watchdog Timer
-Armed at startup with a **30-second timeout**. If the main loop hangs (GPS block, I2C lockup, SD stall), the Pico W resets automatically. The watchdog is fed at the start of each cycle, inside the GPS wait loop, and inside the LoRa receive loop.
-
-### Automatic Pump Cutoff
-The pump is cut automatically under two conditions:
-
 | Condition | Threshold | Action |
-|---|---|---|
-| Battery warning | ≤ 19.8 V (3.3 V × 6) | `WARNING` logged |
-| Battery critical | ≤ 18.6 V (3.1 V × 6) | `ERROR` logged + pump off |
-| CPU temp warning | ≥ 45 °C | `WARNING` logged |
-| CPU temp critical | ≥ 55 °C | `ERROR` logged + pump off |
+|---|---:|---|
+| Battery warning | ≤ 19.8 V | Warning logged |
+| Battery critical | ≤ 18.6 V | Pumps off, valve off, error logged |
+| CPU temperature warning | ≥ 45 °C | Warning logged |
+| CPU temperature critical | ≥ 55 °C | Pumps off, valve off, error logged |
+| Main-loop stall | 30 s watchdog timeout | Pico reset |
+
+The watchdog is fed in the main loop, GPS wait loop, LoRa receive loop and failure-report loops.
+
+## PCB v1 Pin Map
+
+| Function | Pico GPIO |
+|---|---:|
+| GPS UART TX/RX | GP0 / GP1 |
+| I2C SDA/SCL | GP2 / GP3 |
+| Pump front | GP6 |
+| Electrovalve | GP7 |
+| SD chip select | GP9 |
+| SPI SCK/MOSI/MISO | GP10 / GP11 / GP12 |
+| LoRa chip select | GP16 |
+| OPC chip select (reserved) | GP17 |
+| Pump back | GP21 |
+| Battery monitor ADC | GP27 |
+| Flowmeter ADC | GP28 |
+
+The RFM9x reset line is not routed on PCB v1. `config.LORA_RESET_DUMMY` remains because the CircuitPython RFM9x driver requires a reset-pin argument.
 
 ## Calibration
 
-### Flow Meter (TSI 4121)
-- Output: 0–4 V → 0–20 Std L/min
-- Voltage divider on ADC input: 10 kΩ series + 32.6 kΩ to GND (ratio = 0.7652)
-- Zero offset (`_FLOW_OFFSET_LMIN`): measure `flow` with pump off and set that value in `payload.py`
+### Flowmeter
 
-### Battery Monitor (6S Li-ion, 22.2 V nominal)
-- Calibration factor `_BAT_CAL_FACTOR = 10.15` (measured: multimeter 24.82 V, raw ADC × 10 = 24.44 V)
-- To recalibrate: connect battery, read `battery_voltage` from JSON, measure with multimeter, update factor = `multimeter_V / reported_V * current_factor`
+The TSI 4121 flowmeter is configured as:
 
-## Pin Map (Payload)
+- Signal range: 0–4 V corresponding to 0–20 Std L/min.
+- ADC divider: 10 kΩ series resistor and 32.6 kΩ to ground.
+- Divider ratio: \(32.6 / (10.0 + 32.6)\).
+- Zero offset: `FLOW_OFFSET_LMIN` in `firmware/common/config.py`.
 
-| Function | GPIO |
-|---|---|
-| SPI SCK (LoRa + SD) | GP2 |
-| SPI MOSI | GP3 |
-| SPI MISO | GP4 |
-| LoRa CS | GP5 |
-| LoRa RESET | GP14 |
-| SD CS | GP18 |
-| GPS UART TX | GP0 |
-| GPS UART RX | GP1 |
-| I2C SDA (RH + pressure) | GP8 |
-| I2C SCL (RH + pressure) | GP9 |
-| Electrovalve | GP19 |
-| Pump front | GP20 |
-| Pump back | GP21 |
-| Battery monitor | GP27 |
-| Flow meter | GP28 |
+### Battery monitor
+
+`BATTERY_CAL_FACTOR` in `firmware/common/config.py` converts the Pico ADC voltage to the measured 6S battery voltage. Recalibrate against a multimeter if the divider or analog front-end changes.
+
+## Development Notes
+
+- `firmware/common/payload.py` contains the active, hardware-validated payload drivers and mission loop.
+- `firmware/common/config.py` is the single source of truth for PCB pins, calibration, operating limits and LoRa addresses.
+- The old breadboard firmware is preserved in the `old_hardware` branch.
+- See `docs/TROUBLESHOOTING.md` for deployment and communication diagnostics.
