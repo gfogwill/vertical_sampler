@@ -3,6 +3,7 @@ import config
 import pack
 from actuators import Pump, Valve
 from power import PowerMonitor
+from safety import SafetyInterlock
 
 
 def _snapshot(payload_id, pump, valve, power, logger):
@@ -12,19 +13,16 @@ def _snapshot(payload_id, pump, valve, power, logger):
         "pump_back_state": pump.back_state(),
         "valve_state": valve.state(),
     }
-
     try:
         data["battery_voltage"] = power.battery_voltage()
     except Exception as error:
         data["battery_voltage"] = None
         logger.warning("Battery read failed: {}".format(error))
-
     try:
         data["cpu_temperature"] = power.cpu_temperature()
     except Exception as error:
         data["cpu_temperature"] = None
         logger.warning("CPU temperature read failed: {}".format(error))
-
     return data
 
 
@@ -34,16 +32,19 @@ def _send(lora, data, msg_type):
     lora.send(pack.dict2bytes(packet))
 
 
-def _handle_command(msg, data, pump, valve, power, lora, payload_id, logger):
+def _handle_command(msg, data, pump, valve, power, safety, lora, payload_id, logger):
     try:
         text = msg.decode().strip().lower()
         parts = text.split()
         if not parts:
             return
-
-        command = parts[0]
-        args = parts[1:]
-
+        command, args = parts[0], parts[1:]
+        turning_on = (
+            (command == "pump" and len(args) == 2 and args[1] == "on")
+            or (command == "valve" and len(args) == 1 and args[0] == "on")
+        )
+        if safety.locked and turning_on:
+            raise ValueError("safety interlock active")
         if command == "pump":
             if len(args) != 2:
                 raise ValueError("pump requires: pump <front|back|both> <on|off>")
@@ -54,11 +55,9 @@ def _handle_command(msg, data, pump, valve, power, lora, payload_id, logger):
             valve.set_state(args[0])
         elif command != "data":
             raise ValueError("unknown command: " + command)
-
         data.update(_snapshot(payload_id, pump, valve, power, logger))
         _send(lora, data, pack.MSG_COMMAND_ACK)
         logger.info("cmd_ack: " + text)
-
     except Exception as error:
         logger.error("Command error: {}".format(error))
         data.update(_snapshot(payload_id, pump, valve, power, logger))
@@ -73,26 +72,25 @@ def main_loop(lora, payload_id, logger, spi=None):
     pump = Pump(logger)
     valve = Valve(logger)
     power = PowerMonitor(logger)
+    safety = SafetyInterlock(logger)
     data = _snapshot(payload_id, pump, valve, power, logger)
     next_heartbeat = time.monotonic() + config.HEARTBEAT_OFFSETS.get(payload_id, 0)
-
-    logger.info("LoRa actuator and power payload ready")
-
+    next_safety = time.monotonic()
+    logger.info("LoRa actuator, power, and safety payload ready")
     while True:
         try:
             msg = lora.receive(timeout=0.2)
             if msg is not None:
-                _handle_command(
-                    msg, data, pump, valve, power, lora, payload_id, logger
-                )
-
+                _handle_command(msg, data, pump, valve, power, safety, lora, payload_id, logger)
             now = time.monotonic()
+            if now >= next_safety:
+                safety.update(power, pump, valve)
+                next_safety = now + 1.0
             if now >= next_heartbeat:
                 data.update(_snapshot(payload_id, pump, valve, power, logger))
                 _send(lora, data, pack.MSG_TELEMETRY)
                 logger.info("Heartbeat sent")
                 next_heartbeat = now + config.HEARTBEAT_INTERVAL_S
-
         except Exception as error:
             logger.error("LoRa loop error: {}".format(error))
             time.sleep(0.5)
