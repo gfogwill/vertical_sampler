@@ -23,7 +23,6 @@ def _snapshot(payload_id, pump, valve, power, logger):
 def _send(lora, data, typ, status_led):
     p = data.copy(); p["msg_type"] = typ; packet = pack.dict2bytes(p); lora.send(packet)
     status_led.tx()
-    logger = None
 
 def _update_sht85(data, sensor, logger, status_led):
     try:
@@ -78,10 +77,12 @@ def main_loop(lora,payload_id,logger,spi=None):
             msg=lora.receive(timeout=0.2)
             if msg is not None:
                 status_led.rx(); _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,status_led)
-            now=time.monotonic()
+            now=time.monotonic(); sampled = False
             if now>=next_safety: safety.update(power,pump,valve); next_safety=now+1.0
-            if now>=next_sht85: _update_sht85(data,sht85,logger,status_led); next_sht85=now+SHT85_INTERVAL_S
-            if now>=next_pressure: _update_pressure(data,pressure_sensor,logger,status_led); next_pressure=now+PRESSURE_INTERVAL_S
+            if now>=next_sht85: _update_sht85(data,sht85,logger,status_led); next_sht85=now+SHT85_INTERVAL_S; sampled = True
+            if now>=next_pressure: _update_pressure(data,pressure_sensor,logger,status_led); next_pressure=now+PRESSURE_INTERVAL_S; sampled = True
+            if sampled:
+                data.update(_snapshot(payload_id,pump,valve,power,logger)); logger.data(data)
             if now>=next_heartbeat:
                 data.update(_snapshot(payload_id,pump,valve,power,logger)); _send(lora,data,pack.MSG_TELEMETRY,status_led); logger.info("Heartbeat sent"); next_heartbeat=now+config.HEARTBEAT_INTERVAL_S
             status_led.tick(time.monotonic())
