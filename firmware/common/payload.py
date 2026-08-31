@@ -1,10 +1,11 @@
 import time
+import busio
 import config
 import pack
 from actuators import Pump, Valve
 from power import PowerMonitor
 from safety import SafetyInterlock
-from sht85 import Sht85
+from sht85 import Sht85Sensor
 
 SHT85_INTERVAL_S = 10.0
 
@@ -21,8 +22,10 @@ def _send(lora, data, typ):
 
 def _update_sht85(data, sensor, logger):
     try:
-        t, rh = sensor.read(); data["rh_sensor_temperature"] = t; data["rh_sensor_humidity"] = rh
-        logger.info("SHT85: {:.2f} C, {:.2f} %RH".format(t, rh))
+        humidity_percent, temperature_c = sensor.humidity_and_temperature()
+        data["rh_sensor_temperature"] = temperature_c
+        data["rh_sensor_humidity"] = humidity_percent
+        logger.info("SHT85: {:.2f} C, {:.2f} %RH".format(temperature_c, humidity_percent))
     except Exception as e: logger.warning("SHT85 read failed: {}".format(e))
 
 def _handle_command(msg, data, pump, valve, power, safety, lora, payload_id, logger):
@@ -47,7 +50,9 @@ def _handle_command(msg, data, pump, valve, power, safety, lora, payload_id, log
 
 def main_loop(lora,payload_id,logger,spi=None):
     del spi
-    pump=Pump(logger); valve=Valve(logger); power=PowerMonitor(logger); safety=SafetyInterlock(logger); sht85=Sht85(logger)
+    pump=Pump(logger); valve=Valve(logger); power=PowerMonitor(logger); safety=SafetyInterlock(logger)
+    i2c = busio.I2C(scl=config.I2C_SCL, sda=config.I2C_SDA)
+    sht85 = Sht85Sensor(logger, i2c)
     data=_snapshot(payload_id,pump,valve,power,logger); now=time.monotonic(); next_heartbeat=now+config.HEARTBEAT_OFFSETS.get(payload_id,0); next_safety=now; next_sht85=now
     logger.info("LoRa actuator, power, safety, and SHT85 payload ready")
     while True:
