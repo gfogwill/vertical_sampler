@@ -4,6 +4,7 @@ import config
 import led
 import pack
 from actuators import Pump, Valve
+from flowmeter import FlowMeter
 from power import PowerMonitor
 from safety import SafetyInterlock
 from sht85 import Sht85Sensor
@@ -11,6 +12,7 @@ from pressure_sensor import PressureSensor
 
 SHT85_INTERVAL_S = 10.0
 PRESSURE_INTERVAL_S = 10.0
+FLOW_INTERVAL_S = 10.0
 
 def _snapshot(payload_id, pump, valve, power, logger):
     data = {"payload_id": payload_id, "pump_front_state": pump.front_state(), "pump_back_state": pump.back_state(), "valve_state": valve.state()}
@@ -38,6 +40,20 @@ def _update_pressure(data, sensor, logger, status_led):
         data["pressure_sensor_pressure"] = pressure_mbar; data["pressure_sensor_temperature"] = temperature_c
         logger.info("Pressure: {:.2f} mbar, {:.2f} C".format(pressure_mbar, temperature_c)); status_led.sensors_updated()
     except Exception as e: logger.warning("Pressure read failed: {}".format(e))
+
+def _update_flow(data, sensor, logger, status_led):
+    if sensor is None: return
+    try:
+        flow_l_min = sensor.flow_l_min()
+        data["flow"] = flow_l_min
+        logger.info("Flow: {:.3f} L/min".format(flow_l_min)); status_led.sensors_updated()
+    except Exception as e: logger.warning("Flow read failed: {}".format(e))
+
+def _update_rssi(data, lora, logger):
+    try:
+        data["rssi"] = int(lora.rssi())
+        logger.info("LoRa RX RSSI: {} dBm".format(data["rssi"]))
+    except Exception as e: logger.warning("LoRa RSSI read failed: {}".format(e))
 
 def _handle_command(msg, data, pump, valve, power, safety, lora, payload_id, logger, status_led):
     try:
@@ -69,18 +85,24 @@ def main_loop(lora,payload_id,logger,spi=None):
         pressure_sensor = PressureSensor(logger, i2c)
     except Exception as e:
         pressure_sensor = None; logger.warning("Pressure sensor unavailable: {}".format(e))
-    data=_snapshot(payload_id,pump,valve,power,logger); now=time.monotonic(); next_heartbeat=now+config.HEARTBEAT_OFFSETS.get(payload_id,0); next_safety=now; next_sht85=now; next_pressure=now
-    logger.info("LoRa actuator, power, safety, SHT85, pressure, and LED payload ready")
+    try:
+        flow_meter = FlowMeter(logger)
+    except Exception as e:
+        flow_meter = None; logger.warning("Flow meter unavailable: {}".format(e))
+    data=_snapshot(payload_id,pump,valve,power,logger); data["flow"] = None; data["rssi"] = None
+    now=time.monotonic(); next_heartbeat=now+config.HEARTBEAT_OFFSETS.get(payload_id,0); next_safety=now; next_sht85=now; next_pressure=now; next_flow=now
+    logger.info("LoRa actuator, power, safety, SHT85, pressure, flow, and LED payload ready")
     while True:
         try:
             now=time.monotonic(); status_led.tick(now)
             msg=lora.receive(timeout=0.2)
             if msg is not None:
-                status_led.rx(); _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,status_led)
+                status_led.rx(); _update_rssi(data,lora,logger); _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,status_led)
             now=time.monotonic(); sampled = False
             if now>=next_safety: safety.update(power,pump,valve); next_safety=now+1.0
             if now>=next_sht85: _update_sht85(data,sht85,logger,status_led); next_sht85=now+SHT85_INTERVAL_S; sampled = True
             if now>=next_pressure: _update_pressure(data,pressure_sensor,logger,status_led); next_pressure=now+PRESSURE_INTERVAL_S; sampled = True
+            if now>=next_flow: _update_flow(data,flow_meter,logger,status_led); next_flow=now+FLOW_INTERVAL_S; sampled = True
             if sampled:
                 data.update(_snapshot(payload_id,pump,valve,power,logger)); logger.data(data)
             if now>=next_heartbeat:
