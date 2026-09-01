@@ -17,26 +17,15 @@ class Logger:
         if self.LEVELS.get(level, 0) < self.level:
             return
         current = time.localtime()
-        timestamp = "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(
-            current.tm_year, current.tm_mon, current.tm_mday,
-            current.tm_hour, current.tm_min, current.tm_sec,
-        )
-        self.sd_card.write_log("{} - {} - {} - {}\n".format(timestamp, level, self.name, message))
+        timestamp = "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(current.tm_year, current.tm_mon, current.tm_mday, current.tm_hour, current.tm_min, current.tm_sec)
+        print("{} - {} - {} - {}".format(timestamp, level, self.name, message))
+        self.sd_card.write_log({"record_type": "log", "timestamp": timestamp, "level": level, "logger": self.name, "message": message})
 
-    def debug(self, message):
-        self._log("DEBUG", message)
-
-    def info(self, message):
-        self._log("INFO", message)
-
-    def warning(self, message):
-        self._log("WARNING", message)
-
-    def error(self, message):
-        self._log("ERROR", message)
-
-    def data(self, data):
-        self.sd_card.write_data(data)
+    def debug(self, message): self._log("DEBUG", message)
+    def info(self, message): self._log("INFO", message)
+    def warning(self, message): self._log("WARNING", message)
+    def error(self, message): self._log("ERROR", message)
+    def data(self, data): self.sd_card.write_data(data)
 
 
 def getLogger(name, sd_card, level="DEBUG"):

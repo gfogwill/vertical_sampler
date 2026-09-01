@@ -12,16 +12,14 @@ class SDCard:
         self._sample_index = 0
         self.payload_id = payload_id
         self.session = None
-        self.log_fname = "{}_log.txt".format(payload_id)
         self.data_fname = "{}_001.jsonl".format(payload_id)
         try:
             sdcard = sdcardio.SDCard(spi, config.SD_CS)
             storage.mount(storage.VfsFat(sdcard), "/sd")
             self.session = self._next_session(payload_id)
-            self.log_fname = "/sd/{}_log.txt".format(payload_id)
             self.data_fname = "/sd/{}_{:03d}.jsonl".format(payload_id, self.session)
             self._available = True
-            self.write_data({"record_type": "session_start", "payload_id": payload_id, "session": self.session})
+            self.write_record({"record_type": "session_start", "payload_id": payload_id, "session": self.session})
             print("SD card mounted OK. Data: {}".format(self.data_fname))
         except Exception as error:
             self._disable("mount", error)
@@ -48,26 +46,22 @@ class SDCard:
             self._failure_reported = True
             print("SD unavailable after {}: {} — logging to console only".format(operation, error))
 
-    def write_log(self, line):
-        print(line, end="")
+    def write_record(self, record):
         if not self._available:
             return
         try:
-            with open(self.log_fname, "a") as handle:
-                handle.write(line)
-        except Exception as error:
-            self._disable("log write", error)
-
-    def write_data(self, data):
-        if not self._available:
-            return
-        try:
-            record = dict(data)
-            record.setdefault("record_type", "telemetry")
-            if record["record_type"] == "telemetry":
-                self._sample_index += 1
-                record["sample_index"] = self._sample_index
             with open(self.data_fname, "a") as handle:
                 handle.write(json.dumps(record) + "\n")
         except Exception as error:
-            self._disable("data write", error)
+            self._disable("write", error)
+
+    def write_log(self, record):
+        self.write_record(record)
+
+    def write_data(self, data):
+        record = dict(data)
+        record.setdefault("record_type", "telemetry")
+        if record["record_type"] == "telemetry":
+            self._sample_index += 1
+            record["sample_index"] = self._sample_index
+        self.write_record(record)
