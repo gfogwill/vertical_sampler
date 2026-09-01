@@ -47,12 +47,20 @@ def _update_flow(data,sensor,logger,status_led):
         flow=sensor.flow_l_min(); data["flow"]=flow; logger.info("Flow: {:.3f} L/min".format(flow)); status_led.sensors_updated()
     except Exception as e: logger.warning("Flow read failed: {}".format(e))
 
-def _update_opc_histogram(opc,logger,status_led):
+def _update_opc_histogram(data,opc,logger,status_led):
     if opc is None: return
     try:
-        histogram=opc.histogram(); histogram["payload_id"]="opc_histogram"; logger.data(histogram)
-        total=sum(histogram["bin_{}".format(i)] for i in range(24))
-        logger.info("OPC histogram logged: total={:.2f} pm1={:.2f} pm25={:.2f} pm10={:.2f}".format(total,histogram["opc_pm1"],histogram["opc_pm25"],histogram["opc_pm10"]))
+        raw=opc.histogram(raw=True)
+        raw["payload_id"]="opc_histogram"
+        logger.data(raw)
+        for i in range(24):
+            data["opc_bin_{}".format(i)]=raw["bin_{}".format(i)]
+        data["opc_temperature"]=opc._convert_temperature(raw["temperature_raw"])
+        data["opc_humidity"]=opc._convert_relative_humidity(raw["relative_humidity_raw"])
+        data["opc_sample_flow"]=raw["sfr_raw"]/100.0
+        data["opc_laser_status"]=raw["laser_status"]
+        total=sum(raw["bin_{}".format(i)] for i in range(24))
+        logger.info("OPC histogram logged: raw_total={} laser={}".format(total,raw["laser_status"]))
         status_led.sensors_updated()
     except Exception as e: logger.warning("OPC histogram read failed: {}".format(e))
 
@@ -97,6 +105,8 @@ def main_loop(lora,payload_id,logger,spi=None):
     else:
         logger.warning("OPC-N3 disabled: no shared SPI bus provided")
     data=_snapshot(payload_id,pump,valve,power,logger); data["flow"]=None; data["rssi"]=None
+    for i in range(24): data["opc_bin_{}".format(i)]=None
+    data["opc_temperature"]=None; data["opc_humidity"]=None; data["opc_sample_flow"]=None; data["opc_laser_status"]=None
     if gps is not None: data.update(gps.fields())
     now=time.monotonic(); next_heartbeat=now+config.HEARTBEAT_OFFSETS.get(payload_id,0); next_safety=now; next_sht85=now; next_pressure=now; next_flow=now
     next_opc_histogram=now+OPC_HISTOGRAM_INTERVAL_S if opc is not None else None
@@ -114,7 +124,7 @@ def main_loop(lora,payload_id,logger,spi=None):
             if now>=next_sht85: _update_sht85(data,sht85,logger,status_led); next_sht85=now+SHT85_INTERVAL_S; sampled=True
             if now>=next_pressure: _update_pressure(data,pressure_sensor,logger,status_led); next_pressure=now+PRESSURE_INTERVAL_S; sampled=True
             if now>=next_flow: _update_flow(data,flow_meter,logger,status_led); next_flow=now+FLOW_INTERVAL_S; sampled=True
-            if next_opc_histogram is not None and now>=next_opc_histogram: _update_opc_histogram(opc,logger,status_led); next_opc_histogram=now+OPC_HISTOGRAM_INTERVAL_S
+            if next_opc_histogram is not None and now>=next_opc_histogram: _update_opc_histogram(data,opc,logger,status_led); next_opc_histogram=now+OPC_HISTOGRAM_INTERVAL_S; sampled=True
             if sampled:
                 data.update(_snapshot(payload_id,pump,valve,power,logger))
                 if gps is not None: data.update(gps.fields())
