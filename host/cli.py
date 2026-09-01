@@ -27,19 +27,19 @@ class State(Enum):
         return self.value
 
 
-FILL_INT   = -999999
-FILL_UINT  = 4294967295
+FILL_INT = -999999
+FILL_UINT = 4294967295
 FILL_FLOAT = -1e9
 
-PAYLOAD_CYCLE_S  = 35
+PAYLOAD_CYCLE_S = 35
 RETRY_INTERVAL_S = 5
-MAX_RETRIES      = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
+MAX_RETRIES = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
 
 # Wire format constants (must match payload/pack.py)
-_MSG_TYPE_LEN  = 12   # field is 12s in struct format
+_MSG_TYPE_LEN = 12  # field is 12s in struct format
 _MSG_TELEMETRY = "telemetry"
-_MSG_CMD_ACK   = "cmd_ack"
-_MSG_CMD_ERR   = "cmd_err"
+_MSG_CMD_ACK = "cmd_ack"
+_MSG_CMD_ERR = "cmd_err"
 _CMD_RESPONSE_TYPES = {_MSG_CMD_ACK, _MSG_CMD_ERR}
 
 _UTC = datetime.timezone.utc
@@ -58,12 +58,17 @@ FIELDS = [
     ("pump_front_state",            "Pump front",        "",      "Sampler"),
     ("pump_back_state",             "Pump back",         "",      "Sampler"),
     ("valve_state",                 "Valve",             "",      "Sampler"),
+    ("_opc_bin_total",              "Bin total (raw)",   "cnt",   "OPC"),
+    ("opc_temperature",             "Temperature",       "\u00b0C",   "OPC"),
+    ("opc_humidity",                "Humidity",          "%RH",   "OPC"),
+    ("opc_sample_flow",             "Sample flow",       "mL/s",  "OPC"),
+    ("opc_laser_status",            "Laser status",      "",      "OPC"),
     ("battery_voltage",             "Battery",           "V",     "System"),
     ("cpu_temperature",             "CPU temp",          "\u00b0C",   "System"),
     ("rssi",                        "RSSI",              "dBm",   "System"),
 ]
 
-GROUP_ORDER = ["GPS", "Atmosphere", "Sampler", "System"]
+GROUP_ORDER = ["GPS", "Atmosphere", "Sampler", "OPC", "System"]
 
 # Control key map: key -> (payload_index, actuator, label)
 # Uppercase = matorova (index 0), lowercase = kenttarova (index 1)
@@ -76,10 +81,9 @@ _CTRL_KEYS = {
     ord('v'): (1, "valve", None),
 }
 
-
 # Per-payload additive pressure offsets (hPa) calibrated against TSI 4100 reference
 _PRESSURE_OFFSET_HPA = {
-    Payload.MATOROVA:   +2.1,   # offset = P_TSI_4100 - P_sensor_crudo (medido en calibración)
+    Payload.MATOROVA: +2.1,     # offset = P_TSI_4100 - P_sensor_crudo (medido en calibración)
     Payload.KENTTAROVA: -1.9,
 }
 
@@ -123,9 +127,9 @@ def _fmt_value(key, val):
 def pretty_print(data, payload_id=""):
     COL_LABEL = 26
     COL_VALUE = 10
-    COL_UNIT  = 7
+    COL_UNIT = 7
     W = COL_LABEL + COL_VALUE + COL_UNIT + 6
-    title = "  {}  ".format(payload_id.upper() if payload_id else "TELEMETRY")
+    title = " {} ".format(payload_id.upper() if payload_id else "TELEMETRY")
     lines = []
     lines.append("\u2554" + "\u2550" * W + "\u2557")
     lines.append("\u2551" + title.center(W) + "\u2551")
@@ -136,12 +140,12 @@ def pretty_print(data, payload_id=""):
             continue
         grouped[group].append((key, label, unit))
     for g_idx, group in enumerate(GROUP_ORDER):
-        group_title = "  " + group
+        group_title = " " + group
         lines.append("\u2551 " + group_title.ljust(COL_LABEL) + " \u2551 " + " " * COL_VALUE + " \u2551 " + " " * COL_UNIT + " \u2551")
         for key, label, unit in grouped[group]:
             val = data.get(key)
             val_str, is_fill = _fmt_value(key, val)
-            label_col = "    " + label
+            label_col = " " + label
             if is_fill:
                 val_str = "N/A"
                 unit = ""
@@ -239,8 +243,21 @@ def _read_cmd_response(ser, timeout_s, accept_telemetry=False):
     return None
 
 
+def _opc_bin_total(d):
+    """Sum raw OPC-N3 bin counts (opc_bin_0..opc_bin_23) if present and not fill values."""
+    total = 0
+    found = False
+    for i in range(24):
+        v = d.get("opc_bin_{}".format(i))
+        if v is None or (isinstance(v, int) and v == FILL_UINT):
+            continue
+        total += v
+        found = True
+    return total if found else None
+
+
 def _enrich_data(data, payload, qnh_hpa=1013.25):
-    """Apply pressure offset and compute pressure altitude in-place."""
+    """Apply pressure offset, compute pressure altitude and OPC bin total in-place."""
     p = data.get("pressure_sensor_pressure")
     if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
         p_corrected = _apply_pressure_offset(payload, p)
@@ -248,6 +265,7 @@ def _enrich_data(data, payload, qnh_hpa=1013.25):
         data["_pressure_altitude"] = _pressure_altitude(p_corrected, qnh_hpa)
     else:
         data["_pressure_altitude"] = None
+    data["_opc_bin_total"] = _opc_bin_total(data)
     return data
 
 
@@ -262,7 +280,7 @@ def relay_cmd(args):
             ser.write(cmd)
             ser.flush()
             data = _read_cmd_response(ser, timeout_s=RETRY_INTERVAL_S,
-                                      accept_telemetry=is_data)
+                                       accept_telemetry=is_data)
             if data is not None:
                 print(" OK" if data.get("msg_type") != _MSG_CMD_ERR else " ERROR")
                 if args.subcommand == "data":
@@ -284,10 +302,10 @@ def relay_cmd(args):
 MAX_EVENTS = 8
 _PAYLOADS_ALL = [Payload.MATOROVA, Payload.KENTTAROVA]
 
-_CMD_POLL_ALL  = "poll_all"
-_CMD_POLL_ONE  = "poll_one"
-_CMD_CONTROL   = "control"
-_CMD_QUIT      = "quit"
+_CMD_POLL_ALL = "poll_all"
+_CMD_POLL_ONE = "poll_one"
+_CMD_CONTROL = "control"
+_CMD_QUIT = "quit"
 
 
 class PollWorker(threading.Thread):
@@ -308,6 +326,7 @@ class PollWorker(threading.Thread):
         else:
             d["pressure_sensor_pressure_corrected"] = None
             d["_pressure_altitude"] = None
+        d["_opc_bin_total"] = _opc_bin_total(d)
         return d
 
     def _log(self, d):
@@ -328,7 +347,7 @@ class PollWorker(threading.Thread):
             d["_ts"] = time.time()
             self._enrich(d, payload)
             self._log(d)
-        self.result_q.put((payload, d))
+            self.result_q.put((payload, d))
 
     def _send_control(self, ser, cmd_bytes, payload):
         _drain_serial(ser, timeout_s=0.5)
@@ -386,7 +405,7 @@ class PollWorker(threading.Thread):
                         _, payload, cmd_bytes = item
                         d = self._send_control(ser, cmd_bytes, payload)
                         self.result_q.put((payload, d))
-                    continue
+                        continue
                 except queue.Empty:
                     pass
 
@@ -418,13 +437,13 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows):
                   curses.color_pair(2) | curses.A_BOLD)
     row += 1
     if not data:
-        _safe_addnstr(win, row, col_x, "  --- no data ---".ljust(col_w), col_w,
+        _safe_addnstr(win, row, col_x, " --- no data ---".ljust(col_w), col_w,
                       curses.color_pair(3))
         return
     last_updated = data.get("_ts")
     if last_updated:
         age = int(time.time() - last_updated)
-        ts_str = "  updated {}s ago".format(age)
+        ts_str = " updated {}s ago".format(age)
     else:
         ts_str = ""
     _safe_addnstr(win, row, col_x, ts_str.ljust(col_w), col_w, curses.color_pair(4))
@@ -435,7 +454,7 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows):
     for group in GROUP_ORDER:
         if row >= max_rows:
             break
-        _safe_addnstr(win, row, col_x, "  {}".format(group).ljust(col_w), col_w,
+        _safe_addnstr(win, row, col_x, " {}".format(group).ljust(col_w), col_w,
                       curses.color_pair(2) | curses.A_UNDERLINE)
         row += 1
         for key, label, unit in grouped[group]:
@@ -451,7 +470,7 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows):
                 attr = curses.color_pair(3)
             else:
                 attr = curses.color_pair(1)
-            line = "    {:<18} {:>8} {}".format(label, val_str, unit)
+            line = " {:<18} {:>8} {}".format(label, val_str, unit)
             _safe_addnstr(win, row, col_x, line.ljust(col_w), col_w, attr)
             row += 1
 
@@ -462,7 +481,7 @@ def _run_monitor(payloads, qnh, log_file):
     worker = PollWorker(payloads, qnh, log_file)
     worker.start()
 
-    state  = {p: {} for p in payloads}
+    state = {p: {} for p in payloads}
     events = []
 
     def add_event(msg):
@@ -490,10 +509,10 @@ def _run_monitor(payloads, qnh, log_file):
         curses.curs_set(0)
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_WHITE,  -1)
-        curses.init_pair(2, curses.COLOR_CYAN,   -1)
+        curses.init_pair(1, curses.COLOR_WHITE, -1)
+        curses.init_pair(2, curses.COLOR_CYAN, -1)
         curses.init_pair(3, curses.COLOR_YELLOW, -1)
-        curses.init_pair(4, curses.COLOR_GREEN,  -1)
+        curses.init_pair(4, curses.COLOR_GREEN, -1)
         stdscr.timeout(100)
 
         add_event("Monitor started. Listening for heartbeats...")
@@ -531,7 +550,7 @@ def _run_monitor(payloads, qnh, log_file):
             stdscr.erase()
             rows, cols = stdscr.getmaxyx()
             ts_now = datetime.datetime.now(tz=_UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-            header = " Vertical Sampler Monitor  {}  QNH={} hPa ".format(ts_now, qnh)
+            header = " Vertical Sampler Monitor {} QNH={} hPa ".format(ts_now, qnh)
             _safe_addnstr(stdscr, 0, 0, header.ljust(cols - 1), cols - 1,
                           curses.color_pair(2) | curses.A_REVERSE)
 
@@ -555,10 +574,10 @@ def _run_monitor(payloads, qnh, log_file):
                     break
                 t_str = datetime.datetime.fromtimestamp(evt_ts, tz=_UTC).strftime("%H:%M:%S")
                 _safe_addnstr(stdscr, er, 0,
-                              "  {} {}".format(t_str, evt_msg).ljust(cols - 1),
+                              " {} {}".format(t_str, evt_msg).ljust(cols - 1),
                               cols - 1, curses.color_pair(1))
 
-            footer = ("  F/f=pump front  B/b=pump back  V/v=valve  "
+            footer = (" F/f=pump front  B/b=pump back  V/v=valve "
                       "(UPPER=matorova lower=kenttarova)  "
                       "r=poll all  1/2=poll  q=quit")
             try:
@@ -596,7 +615,7 @@ def _run_monitor(payloads, qnh, log_file):
         curses.wrapper(draw)
     except Exception as exc:
         worker.cmd_q.put(_CMD_QUIT)
-        print("[monitor] curses error ({}}), falling back to plain poll.".format(exc))
+        print("[monitor] curses error ({}), falling back to plain poll.".format(exc))
         worker2 = PollWorker(payloads, qnh, log_file)
         worker2.start()
         worker2.cmd_q.put(_CMD_POLL_ALL)
@@ -626,8 +645,8 @@ def parse_args():
         p.add_argument("payload", type=Payload, choices=list(Payload))
         if sub_name == "pump":
             p.add_argument("pump_location", type=str, choices=["front", "back", "both"])
-            p.add_argument("state", type=State, choices=list(State))
-        elif sub_name == "valve":
+        p.add_argument("state", type=State, choices=list(State)) if sub_name != "pump" else None
+        if sub_name == "pump":
             p.add_argument("state", type=State, choices=list(State))
 
     mon = subparsers.add_parser("monitor", help="Live TUI dashboard")
