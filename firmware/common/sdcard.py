@@ -1,11 +1,15 @@
 import json
 import os
+import time
+import digitalio
 import sdcardio
 import storage
 import config
 
 
 class SDCard:
+    INIT_ATTEMPTS = 2
+
     def __init__(self, spi, payload_id):
         self._available = False
         self._failure_reported = False
@@ -14,18 +18,32 @@ class SDCard:
         self.session = None
         self.log_fname = None
         self.data_fname = None
-        try:
-            sdcard = sdcardio.SDCard(spi, config.SD_CS)
-            storage.mount(storage.VfsFat(sdcard), "/sd")
-            self.session = self._next_session(payload_id)
-            stem = "{}_{:03d}".format(payload_id, self.session)
-            self.log_fname = "/sd/{}.log".format(stem)
-            self.data_fname = "/sd/{}.jsonl".format(stem)
-            self._available = True
-            self.write_data({"record_type": "session_start", "payload_id": payload_id, "session": self.session})
-            print("SD card mounted OK. Data: {}".format(self.data_fname))
-        except Exception as error:
-            self._disable("mount", error)
+        self._cs = digitalio.DigitalInOut(config.SD_CS)
+        self._cs.switch_to_output(value=True)
+        self._mount(spi)
+
+    def _mount(self, spi):
+        last_error = None
+        for attempt in range(1, self.INIT_ATTEMPTS + 1):
+            try:
+                print("SD init attempt {}/{}".format(attempt, self.INIT_ATTEMPTS))
+                self._cs.value = True
+                time.sleep(0.05)
+                sdcard = sdcardio.SDCard(spi, self._cs)
+                storage.mount(storage.VfsFat(sdcard), "/sd")
+                self.session = self._next_session(self.payload_id)
+                stem = "{}_{:03d}".format(self.payload_id, self.session)
+                self.log_fname = "/sd/{}.log".format(stem)
+                self.data_fname = "/sd/{}.jsonl".format(stem)
+                self._available = True
+                self.write_data({"record_type": "session_start", "payload_id": self.payload_id, "session": self.session})
+                print("SD card mounted OK. Data: {}".format(self.data_fname))
+                return
+            except Exception as error:
+                last_error = error
+                print("SD init attempt {} failed: {}".format(attempt, error))
+                time.sleep(0.1)
+        self._disable("mount", last_error)
 
     def _next_session(self, payload_id):
         existing = os.listdir("/sd")
