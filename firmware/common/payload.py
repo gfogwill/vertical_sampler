@@ -10,10 +10,12 @@ from power import PowerMonitor
 from safety import SafetyInterlock
 from sht85 import Sht85Sensor
 from pressure_sensor import PressureSensor
+from opc_n3 import OPCN3
 
 SHT85_INTERVAL_S=10.0
 PRESSURE_INTERVAL_S=10.0
 FLOW_INTERVAL_S=10.0
+OPC_HISTOGRAM_INTERVAL_S=10.0
 
 def _snapshot(payload_id,pump,valve,power,logger):
     data={"payload_id":payload_id,"pump_front_state":pump.front_state(),"pump_back_state":pump.back_state(),"valve_state":valve.state()}
@@ -45,6 +47,15 @@ def _update_flow(data,sensor,logger,status_led):
         flow=sensor.flow_l_min(); data["flow"]=flow; logger.info("Flow: {:.3f} L/min".format(flow)); status_led.sensors_updated()
     except Exception as e: logger.warning("Flow read failed: {}".format(e))
 
+def _update_opc_histogram(opc,logger,status_led):
+    if opc is None: return
+    try:
+        histogram=opc.histogram(); histogram["payload_id"]="opc_histogram"; logger.data(histogram)
+        total=sum(histogram["bin_{}".format(i)] for i in range(24))
+        logger.info("OPC histogram logged: total={:.2f} pm1={:.2f} pm25={:.2f} pm10={:.2f}".format(total,histogram["opc_pm1"],histogram["opc_pm25"],histogram["opc_pm10"]))
+        status_led.sensors_updated()
+    except Exception as e: logger.warning("OPC histogram read failed: {}".format(e))
+
 def _update_rssi(data,lora,logger):
     try: data["rssi"]=int(lora.rssi()); logger.info("LoRa RX RSSI: {} dBm".format(data["rssi"]))
     except Exception as e: logger.warning("LoRa RSSI read failed: {}".format(e))
@@ -69,7 +80,6 @@ def _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,stat
         except Exception as x: logger.error("cmd_err send failed: {}".format(x))
 
 def main_loop(lora,payload_id,logger,spi=None):
-    del spi
     pump=Pump(logger); valve=Valve(logger); power=PowerMonitor(logger); safety=SafetyInterlock(logger); status_led=led.StatusLed(logger)
     i2c=busio.I2C(scl=config.I2C_SCL,sda=config.I2C_SDA); sht85=Sht85Sensor(logger,i2c)
     try: pressure_sensor=PressureSensor(logger,i2c)
@@ -78,10 +88,19 @@ def main_loop(lora,payload_id,logger,spi=None):
     except Exception as e: flow_meter=None; logger.warning("Flow meter unavailable: {}".format(e))
     try: gps=Gps(logger)
     except Exception as e: gps=None; logger.warning("GPS unavailable: {}".format(e))
+    opc=None
+    if spi is not None:
+        try:
+            opc=OPCN3(spi,logger)
+            opc.on(warmup=False)
+        except Exception as e: opc=None; logger.warning("OPC-N3 unavailable: {}".format(e))
+    else:
+        logger.warning("OPC-N3 disabled: no shared SPI bus provided")
     data=_snapshot(payload_id,pump,valve,power,logger); data["flow"]=None; data["rssi"]=None
     if gps is not None: data.update(gps.fields())
     now=time.monotonic(); next_heartbeat=now+config.HEARTBEAT_OFFSETS.get(payload_id,0); next_safety=now; next_sht85=now; next_pressure=now; next_flow=now
-    logger.info("LoRa actuator, power, GPS, safety, SHT85, pressure, flow, and LED payload ready")
+    next_opc_histogram=now+OPC_HISTOGRAM_INTERVAL_S if opc is not None else None
+    logger.info("LoRa actuator, power, GPS, safety, SHT85, pressure, flow, OPC-N3, and LED payload ready")
     while True:
         try:
             now=time.monotonic(); status_led.tick(now)
@@ -95,6 +114,7 @@ def main_loop(lora,payload_id,logger,spi=None):
             if now>=next_sht85: _update_sht85(data,sht85,logger,status_led); next_sht85=now+SHT85_INTERVAL_S; sampled=True
             if now>=next_pressure: _update_pressure(data,pressure_sensor,logger,status_led); next_pressure=now+PRESSURE_INTERVAL_S; sampled=True
             if now>=next_flow: _update_flow(data,flow_meter,logger,status_led); next_flow=now+FLOW_INTERVAL_S; sampled=True
+            if next_opc_histogram is not None and now>=next_opc_histogram: _update_opc_histogram(opc,logger,status_led); next_opc_histogram=now+OPC_HISTOGRAM_INTERVAL_S
             if sampled:
                 data.update(_snapshot(payload_id,pump,valve,power,logger))
                 if gps is not None: data.update(gps.fields())

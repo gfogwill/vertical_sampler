@@ -16,7 +16,7 @@ def main():
     lora = LoRa(spi, config.KENTTAROVA_RFM_ADDRESS, config.GROUND_RFM_ADDRESS)
     sd_card = SDCard(spi, PAYLOAD_ID)
     logger = logging.getLogger("{}-main".format(PAYLOAD_ID), sd_card)
-    main_loop(lora=lora, payload_id=PAYLOAD_ID, logger=logger)
+    main_loop(lora=lora, payload_id=PAYLOAD_ID, logger=logger, spi=spi)
 
 
 if __name__ == "__main__":
