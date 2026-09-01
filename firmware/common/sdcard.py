@@ -1,7 +1,6 @@
 import json
 import os
 import time
-import digitalio
 import sdcardio
 import storage
 import config
@@ -18,8 +17,6 @@ class SDCard:
         self.session = None
         self.log_fname = None
         self.data_fname = None
-        self._cs = digitalio.DigitalInOut(config.SD_CS)
-        self._cs.switch_to_output(value=True)
         self._mount(spi)
 
     def _mount(self, spi):
@@ -27,9 +24,8 @@ class SDCard:
         for attempt in range(1, self.INIT_ATTEMPTS + 1):
             try:
                 print("SD init attempt {}/{}".format(attempt, self.INIT_ATTEMPTS))
-                self._cs.value = True
                 time.sleep(0.05)
-                sdcard = sdcardio.SDCard(spi, self._cs)
+                sdcard = sdcardio.SDCard(spi, config.SD_CS)
                 storage.mount(storage.VfsFat(sdcard), "/sd")
                 self.session = self._next_session(self.payload_id)
                 stem = "{}_{:03d}".format(self.payload_id, self.session)
