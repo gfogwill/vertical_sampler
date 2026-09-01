@@ -23,7 +23,6 @@ from adafruit_bus_device.spi_device import SPIDevice
 
 import config
 
-
 OPC_READY = 0xF3
 OPC_BUSY = 0x31
 
@@ -353,10 +352,33 @@ class OPCN3:
             (POPT_LASER_SWITCH << 1) | 0
         ])
 
-    def on(self, warmup=True):
-        """Turn laser and fan on; optionally wait for the configured warmup."""
-        self.laser_on()
-        self.fan_on()
+    def on(self, warmup=True, verify_retries=3, verify_delay_s=0.1):
+        """Turn laser and fan on; optionally wait for the configured warmup.
+
+        OPC-N3 sometimes drops the power-state command byte if it arrives
+        while the device is finishing a previous SPI transaction (more
+        likely on a bus shared with SD/LoRa). Verify with power_state()
+        and retry a few times instead of assuming the write succeeded.
+        """
+        for attempt in range(verify_retries):
+            self.laser_on()
+            self.fan_on()
+            time.sleep(verify_delay_s)
+            try:
+                state = self.power_state()
+            except Exception as error:
+                self._log("warning", "OPC power_state check failed: {}".format(error))
+                continue
+            if state.get("laser_on") and state.get("fan_on"):
+                break
+            self._log(
+                "warning",
+                "OPC on() attempt {} did not stick (laser_on={} fan_on={}), retrying".format(
+                    attempt + 1, state.get("laser_on"), state.get("fan_on")
+                ),
+            )
+        else:
+            self._log("error", "OPC on() failed to verify after {} attempts".format(verify_retries))
 
         if warmup:
             self._log(
