@@ -1,52 +1,40 @@
 import json
 import os
-import time
 import sdcardio
 import storage
 import config
 
 
 class SDCard:
-    INIT_ATTEMPTS = 2
-
     def __init__(self, spi, payload_id):
         self._available = False
         self._failure_reported = False
         self._sample_index = 0
         self.payload_id = payload_id
         self.session = None
-        self.log_fname = None
-        self.data_fname = None
-        self._mount(spi)
-
-    def _mount(self, spi):
-        last_error = None
-        for attempt in range(1, self.INIT_ATTEMPTS + 1):
-            try:
-                print("SD init attempt {}/{}".format(attempt, self.INIT_ATTEMPTS))
-                time.sleep(0.05)
-                sdcard = sdcardio.SDCard(spi, config.SD_CS)
-                storage.mount(storage.VfsFat(sdcard), "/sd")
-                self.session = self._next_session(self.payload_id)
-                stem = "{}_{:03d}".format(self.payload_id, self.session)
-                self.log_fname = "/sd/{}.log".format(stem)
-                self.data_fname = "/sd/{}.jsonl".format(stem)
-                self._available = True
-                self.write_data({"record_type": "session_start", "payload_id": self.payload_id, "session": self.session})
-                print("SD card mounted OK. Data: {}".format(self.data_fname))
-                return
-            except Exception as error:
-                last_error = error
-                print("SD init attempt {} failed: {}".format(attempt, error))
-                time.sleep(0.1)
-        self._disable("mount", last_error)
+        self.log_fname = "{}_log.txt".format(payload_id)
+        self.data_fname = "{}_001.jsonl".format(payload_id)
+        try:
+            sdcard = sdcardio.SDCard(spi, config.SD_CS)
+            storage.mount(storage.VfsFat(sdcard), "/sd")
+            self.session = self._next_session(payload_id)
+            self.log_fname = "/sd/{}_log.txt".format(payload_id)
+            self.data_fname = "/sd/{}_{:03d}.jsonl".format(payload_id, self.session)
+            self._available = True
+            self.write_data({"record_type": "session_start", "payload_id": payload_id, "session": self.session})
+            print("SD card mounted OK. Data: {}".format(self.data_fname))
+        except Exception as error:
+            self._disable("mount", error)
 
     def _next_session(self, payload_id):
-        existing = os.listdir("/sd")
+        try:
+            existing = os.listdir("/sd")
+        except Exception:
+            existing = []
         session = 1
         while True:
-            stem = "{}_{:03d}".format(payload_id, session)
-            if "{}.jsonl".format(stem) not in existing and "{}.log".format(stem) not in existing:
+            filename = "{}_{:03d}.jsonl".format(payload_id, session)
+            if filename not in existing:
                 return session
             session += 1
 
