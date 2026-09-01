@@ -328,6 +328,20 @@ class QuickView:
         return None, None
 
     def timestamp_for_entry(self, entry, d, payload):
+        """DEBUG: ignora GPS/RTC y devuelve un timestamp sintético que avanza
+        1 segundo por cada línea leída, así siempre se ve algo en pantalla
+        aunque el payload nunca haya tenido fix de GPS."""
+        if not hasattr(self, "_debug_seq"):
+            self._debug_seq = {}
+        seq = self._debug_seq.get(payload, 0)
+        self._debug_seq[payload] = seq + 1
+        base = getattr(self, "_debug_base", None)
+        if base is None:
+            base = datetime.now().astimezone()
+            self._debug_base = base
+        return base + timedelta(seconds=seq)
+        
+    def timestamp_for_entry_old(self, entry, d, payload):
         """Return a real local datetime for this sample.
 
         Priority: valid rtc_time -> wrapped pc_time -> anchor + gps_time delta
