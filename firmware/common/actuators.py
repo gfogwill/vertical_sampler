@@ -2,6 +2,11 @@ import digitalio
 import config
 
 
+def _set_output(output, value):
+    if output.value != value:
+        output.value = value
+
+
 class Pump:
     def __init__(self, logger):
         self._front = digitalio.DigitalInOut(config.PUMP_FRONT)
@@ -17,9 +22,9 @@ class Pump:
             raise ValueError("pump state: on or off")
         value = state == "on"
         if location in ("front", "both"):
-            self._front.value = value
+            _set_output(self._front, value)
         if location in ("back", "both"):
-            self._back.value = value
+            _set_output(self._back, value)
 
     def front_state(self):
         return int(self._front.value)
@@ -37,7 +42,7 @@ class Valve:
     def set_state(self, state):
         if state not in ("on", "off"):
             raise ValueError("valve state: on or off")
-        self._output.value = state == "on"
+        _set_output(self._output, state == "on")
 
     def state(self):
         return int(self._output.value)

@@ -68,6 +68,28 @@ def _print_json(obj):
     print(json.dumps(obj, separators=(",", ":")))
 
 
+def _command_ack_matches_state(cmd, data):
+    if not cmd:
+        return True
+
+    if cmd[0] == "pump" and len(cmd) == 3:
+        location, state = cmd[1], cmd[2]
+        if location not in ("front", "back", "both") or state not in ("on", "off"):
+            return True
+        expected = int(state == "on")
+        fields = {
+            "front": ("pump_front_state",),
+            "back": ("pump_back_state",),
+            "both": ("pump_front_state", "pump_back_state"),
+        }[location]
+        return all(data.get(field) == expected for field in fields)
+
+    if cmd[0] == "valve" and len(cmd) == 2 and cmd[1] in ("on", "off"):
+        return data.get("valve_state") == int(cmd[1] == "on")
+
+    return True
+
+
 def _process_command(cmd_str):
     parts = cmd_str.split()
     if len(parts) < 2:
@@ -99,8 +121,12 @@ def _process_command(cmd_str):
             continue
 
         msg_type = d.get("msg_type", "")
+        if d.get("payload_id") != payload_id:
+            continue
 
         if msg_type == pack.MSG_COMMAND_ACK:
+            if not _command_ack_matches_state(cmd, d):
+                continue
             ack = d
             break
         elif msg_type == pack.MSG_COMMAND_ERROR:

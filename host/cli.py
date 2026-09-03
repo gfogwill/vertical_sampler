@@ -34,6 +34,9 @@ FILL_FLOAT = -1e9
 PAYLOAD_CYCLE_S = 35
 RETRY_INTERVAL_S = 5
 MAX_RETRIES = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
+# An actuator command is sent once because a missing ACK does not tell us
+# whether the payload applied the command.  This covers ground-side LoRa wait.
+ACTUATOR_RESPONSE_TIMEOUT_S = 25
 
 # Wire format constants (must match payload/pack.py)
 _MSG_TYPE_LEN = 12  # field is 12s in struct format
@@ -210,7 +213,7 @@ def _drain_serial(ser, timeout_s=0.5):
             time.sleep(0.05)
 
 
-def _read_cmd_response(ser, timeout_s, accept_telemetry=False):
+def _read_cmd_response(ser, timeout_s, accept_telemetry=False, expected_payload=None):
     """Read lines until we get a suitable response packet.
 
     If accept_telemetry=True (used for the 'data' command), a
@@ -232,6 +235,11 @@ def _read_cmd_response(ser, timeout_s, accept_telemetry=False):
                 try:
                     d = json.loads(text)
                     msg_type = d.get("msg_type", _MSG_TELEMETRY)
+                    if (
+                        expected_payload is not None
+                        and d.get("payload_id") != str(expected_payload)
+                    ):
+                        continue
                     if msg_type in _CMD_RESPONSE_TYPES:
                         return d
                     if accept_telemetry and msg_type == _MSG_TELEMETRY:
@@ -269,18 +277,29 @@ def _enrich_data(data, payload, qnh_hpa=1013.25):
     return data
 
 
+def _known_binary_state(data, key):
+    value = data.get(key)
+    return value if value in (0, 1) else None
+
+
 def relay_cmd(args):
     cmd = _build_cmd(args)
     is_data = (args.subcommand == "data")
+    max_attempts = MAX_RETRIES if is_data else 1
+    response_timeout_s = RETRY_INTERVAL_S if is_data else ACTUATOR_RESPONSE_TIMEOUT_S
     with find_serial() as ser:
         time.sleep(0.2)
         _drain_serial(ser, timeout_s=0.5)
-        for attempt in range(1, MAX_RETRIES + 1):
-            print("Sending command (attempt {}/{})...".format(attempt, MAX_RETRIES), end="", flush=True)
+        for attempt in range(1, max_attempts + 1):
+            print("Sending command (attempt {}/{})...".format(attempt, max_attempts), end="", flush=True)
             ser.write(cmd)
             ser.flush()
-            data = _read_cmd_response(ser, timeout_s=RETRY_INTERVAL_S,
-                                       accept_telemetry=is_data)
+            data = _read_cmd_response(
+                ser,
+                timeout_s=response_timeout_s,
+                accept_telemetry=is_data,
+                expected_payload=args.payload,
+            )
             if data is not None:
                 print(" OK" if data.get("msg_type") != _MSG_CMD_ERR else " ERROR")
                 if args.subcommand == "data":
@@ -289,10 +308,18 @@ def relay_cmd(args):
                 else:
                     print(json.dumps(data, indent=2))
                 return
+            if not is_data:
+                print(" no response; command may have been applied, not retrying.")
+                break
             print(" no response, retrying...")
-        print("ERROR: no response from {} after {} attempts (~{}s).".format(
-            args.payload, MAX_RETRIES, MAX_RETRIES * RETRY_INTERVAL_S
-        ))
+        if is_data:
+            print("ERROR: no response from {} after {} attempts (~{}s).".format(
+                args.payload, max_attempts, max_attempts * response_timeout_s
+            ))
+        else:
+            print("ERROR: no command acknowledgement from {}; actuator state is unknown.".format(
+                args.payload
+            ))
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +369,12 @@ class PollWorker(threading.Thread):
         _drain_serial(ser, timeout_s=0.5)
         ser.write(cmd)
         ser.flush()
-        d = _read_cmd_response(ser, timeout_s=6, accept_telemetry=True)
+        d = _read_cmd_response(
+            ser,
+            timeout_s=6,
+            accept_telemetry=True,
+            expected_payload=payload,
+        )
         if d is not None:
             d["_ts"] = time.time()
             self._enrich(d, payload)
@@ -353,7 +385,11 @@ class PollWorker(threading.Thread):
         _drain_serial(ser, timeout_s=0.5)
         ser.write(cmd_bytes)
         ser.flush()
-        d = _read_cmd_response(ser, timeout_s=8, accept_telemetry=True)
+        d = _read_cmd_response(
+            ser,
+            timeout_s=ACTUATOR_RESPONSE_TIMEOUT_S,
+            expected_payload=payload,
+        )
         if d is not None:
             d["_ts"] = time.time()
             self._enrich(d, payload)
@@ -490,16 +526,25 @@ def _run_monitor(payloads, qnh, log_file):
             events.pop(0)
 
     def _toggle_pump(payload, location):
-        cur = state[payload].get(
-            "pump_front_state" if location == "front" else "pump_back_state", 0
+        state_key = (
+            "pump_front_state" if location == "front" else "pump_back_state"
         )
+        cur = _known_binary_state(state[payload], state_key)
+        if cur is None:
+            worker.cmd_q.put((_CMD_POLL_ONE, payload))
+            add_event("{} pump {} state unknown; polling first".format(payload, location))
+            return
         new_state = "off" if cur else "on"
         cmd = "{} pump {} {}\n".format(payload, location, new_state).encode()
         worker.cmd_q.put((_CMD_CONTROL, payload, cmd))
         add_event("{} pump {} -> {}".format(payload, location, new_state.upper()))
 
     def _toggle_valve(payload):
-        cur = state[payload].get("valve_state", 0)
+        cur = _known_binary_state(state[payload], "valve_state")
+        if cur is None:
+            worker.cmd_q.put((_CMD_POLL_ONE, payload))
+            add_event("{} valve state unknown; polling first".format(payload))
+            return
         new_state = "off" if cur else "on"
         cmd = "{} valve {}\n".format(payload, new_state).encode()
         worker.cmd_q.put((_CMD_CONTROL, payload, cmd))
