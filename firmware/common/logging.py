@@ -1,5 +1,7 @@
 import time
 
+import config
+
 
 class Logger:
     LEVELS = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "DATA": 3, "ERROR": 4}
@@ -19,7 +21,8 @@ class Logger:
         current = time.localtime()
         timestamp = "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(current.tm_year, current.tm_mon, current.tm_mday, current.tm_hour, current.tm_min, current.tm_sec)
         print("{} - {} - {} - {}".format(timestamp, level, self.name, message))
-        self.sd_card.write_log({"record_type": "log", "timestamp": timestamp, "level": level, "logger": self.name, "message": message})
+        if level in config.SD_LOG_LEVELS:
+            self.sd_card.write_log({"record_type": "log", "timestamp": timestamp, "level": level, "logger": self.name, "message": message})
 
     def debug(self, message): self._log("DEBUG", message)
     def info(self, message): self._log("INFO", message)

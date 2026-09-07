@@ -6,14 +6,17 @@ import config
 
 
 class SDCard:
-    def __init__(self, spi, payload_id):
+    def __init__(self, spi, payload_id, shared_spi=None):
         self._available = False
         self._failure_reported = False
         self._sample_index = 0
         self.payload_id = payload_id
         self.session = None
+        self.shared_spi = shared_spi
         self.data_fname = "{}_001.jsonl".format(payload_id)
         try:
+            if self.shared_spi is not None:
+                self.shared_spi.before_sd()
             sdcard = sdcardio.SDCard(spi, config.SD_CS)
             storage.mount(storage.VfsFat(sdcard), "/sd")
             self.session = self._next_session(payload_id)
@@ -49,9 +52,13 @@ class SDCard:
     def write_record(self, record):
         if not self._available:
             return
+        line = json.dumps(record) + "\n"
         try:
+            if self.shared_spi is not None:
+                self.shared_spi.before_sd()
             with open(self.data_fname, "a") as handle:
-                handle.write(json.dumps(record) + "\n")
+                handle.write(line)
+                handle.flush()
         except Exception as error:
             self._disable("write", error)
 

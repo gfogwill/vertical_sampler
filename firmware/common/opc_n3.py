@@ -146,16 +146,20 @@ class OPCN3:
 
     The caller creates the shared SPI bus. This allows OPC, SD card and
     RFM9x LoRa to share SCK/MOSI/MISO safely, each with its own CS pin.
+    An optional shared_spi arbiter forces the other peripherals' CS
+    lines HIGH before every OPC transaction.
     """
 
     def __init__(
         self,
         spi,
         logger=None,
+        shared_spi=None,
         baudrate=500000,
         warmup_s=5.0,
     ):
         self.logger = logger
+        self.shared_spi = shared_spi
         self.warmup_s = warmup_s
 
         self.cs = digitalio.DigitalInOut(config.OPC_CS)
@@ -171,6 +175,10 @@ class OPCN3:
         self._rx_one = bytearray(1)
 
         self._log("info", "OPC-N3 SPI driver initialized")
+
+    def _before_opc(self):
+        if self.shared_spi is not None:
+            self.shared_spi.before_opc()
 
     def _log(self, level, message):
         if self.logger is None:
@@ -231,6 +239,7 @@ class OPCN3:
 
         CS remains active throughout the full operation.
         """
+        self._before_opc()
         result = bytearray(size)
 
         with self.device as spi:
@@ -247,6 +256,7 @@ class OPCN3:
 
         CS remains active throughout the full operation.
         """
+        self._before_opc()
         with self.device as spi:
             self._send_command_and_wait(spi, command)
 
@@ -302,6 +312,7 @@ class OPCN3:
     def ping(self):
         """Return True when the OPC responds correctly."""
         try:
+            self._before_opc()
             with self.device as spi:
                 self._send_command_and_wait(spi, CMD_CHECK_STATUS)
             return True
@@ -394,6 +405,7 @@ class OPCN3:
 
     def reset(self):
         """Request a documented OPC-N3 software reset."""
+        self._before_opc()
         with self.device as spi:
             self._send_command_and_wait(spi, CMD_RESET)
 

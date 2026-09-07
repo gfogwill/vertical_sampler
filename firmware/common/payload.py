@@ -51,8 +51,6 @@ def _update_opc_histogram(data,opc,logger,status_led):
     if opc is None: return
     try:
         raw=opc.histogram(raw=True)
-        raw["payload_id"]="opc_histogram"
-        logger.data(raw)
         for i in range(24):
             data["opc_bin_{}".format(i)]=raw["bin_{}".format(i)]
         data["opc_temperature"]=opc._convert_temperature(raw["temperature_raw"])
@@ -60,7 +58,7 @@ def _update_opc_histogram(data,opc,logger,status_led):
         data["opc_sample_flow"]=raw["sfr_raw"]/100.0
         data["opc_laser_status"]=raw["laser_status"]
         total=sum(raw["bin_{}".format(i)] for i in range(24))
-        logger.info("OPC histogram logged: raw_total={} laser={}".format(total,raw["laser_status"]))
+        logger.info("OPC histogram read: raw_total={} laser={}".format(total,raw["laser_status"]))
         status_led.sensors_updated()
     except Exception as e: logger.warning("OPC histogram read failed: {}".format(e))
 
@@ -87,7 +85,7 @@ def _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,stat
         try: _send(lora,data,pack.MSG_COMMAND_ERROR,status_led)
         except Exception as x: logger.error("cmd_err send failed: {}".format(x))
 
-def main_loop(lora,payload_id,logger,spi=None):
+def main_loop(lora,payload_id,logger,spi=None,shared_spi=None):
     pump=Pump(logger); valve=Valve(logger); power=PowerMonitor(logger); safety=SafetyInterlock(logger); status_led=led.StatusLed(logger)
     i2c=busio.I2C(scl=config.I2C_SCL,sda=config.I2C_SDA); sht85=Sht85Sensor(logger,i2c)
     try: pressure_sensor=PressureSensor(logger,i2c)
@@ -99,7 +97,7 @@ def main_loop(lora,payload_id,logger,spi=None):
     opc=None
     if spi is not None:
         try:
-            opc=OPCN3(spi,logger)
+            opc=OPCN3(spi,logger,shared_spi=shared_spi)
             opc.on(warmup=False)
         except Exception as e: opc=None; logger.warning("OPC-N3 unavailable: {}".format(e))
     else:
@@ -108,8 +106,9 @@ def main_loop(lora,payload_id,logger,spi=None):
     for i in range(24): data["opc_bin_{}".format(i)]=None
     data["opc_temperature"]=None; data["opc_humidity"]=None; data["opc_sample_flow"]=None; data["opc_laser_status"]=None
     if gps is not None: data.update(gps.fields())
-    now=time.monotonic(); next_heartbeat=now+config.HEARTBEAT_OFFSETS.get(payload_id,0); next_safety=now; next_sht85=now; next_pressure=now; next_flow=now
-    next_opc_histogram=now+OPC_HISTOGRAM_INTERVAL_S if opc is not None else None
+    now=time.monotonic(); next_heartbeat=now+config.HEARTBEAT_OFFSETS.get(payload_id,0); next_safety=now
+    next_sht85=now; next_pressure=now+2.0; next_flow=now+4.0
+    next_opc_histogram=now+6.0 if opc is not None else None
     logger.info("LoRa actuator, power, GPS, safety, SHT85, pressure, flow, OPC-N3, and LED payload ready")
     while True:
         try:

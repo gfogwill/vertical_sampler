@@ -45,3 +45,8 @@ HEARTBEAT_OFFSETS = {
     "matorova": 0,
     "kenttarova": 30,
 }
+
+# Log levels persisted to SD. INFO/DEBUG are printed to console only, to
+# minimize SD write activity during normal operation. DATA always persists
+# via Logger.data(), independent of this list.
+SD_LOG_LEVELS = ("WARNING", "ERROR")
