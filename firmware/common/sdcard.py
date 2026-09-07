@@ -8,7 +8,8 @@ import config
 class SDCard:
     def __init__(self, spi, payload_id, shared_spi=None):
         self._available = False
-        self._failure_reported = False
+        self._mount_failure_reported = False
+        self._write_failures = 0
         self._sample_index = 0
         self.payload_id = payload_id
         self.session = None
@@ -25,7 +26,7 @@ class SDCard:
             self.write_record({"record_type": "session_start", "payload_id": payload_id, "session": self.session})
             print("SD card mounted OK. Data: {}".format(self.data_fname))
         except Exception as error:
-            self._disable("mount", error)
+            self._disable_mount(error)
 
     def _next_session(self, payload_id):
         try:
@@ -43,11 +44,12 @@ class SDCard:
     def available(self):
         return self._available
 
-    def _disable(self, operation, error):
+    def _disable_mount(self, error):
+        # Permanent: the card never mounted, so no write can ever succeed.
         self._available = False
-        if not self._failure_reported:
-            self._failure_reported = True
-            print("SD unavailable after {}: {} — logging to console only".format(operation, error))
+        if not self._mount_failure_reported:
+            self._mount_failure_reported = True
+            print("SD unavailable after mount: {} — logging to console only".format(error))
 
     def write_record(self, record):
         if not self._available:
@@ -60,7 +62,11 @@ class SDCard:
                 handle.write(line)
                 handle.flush()
         except Exception as error:
-            self._disable("write", error)
+            # Transient: drop this one record but keep the card enabled so
+            # the next sample can still be written. A single glitch must
+            # not silence logging for the rest of the mission.
+            self._write_failures += 1
+            print("SD write failed ({}): {} — record dropped, retrying next sample".format(self._write_failures, error))
 
     def write_log(self, record):
         self.write_record(record)

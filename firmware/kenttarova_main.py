@@ -1,6 +1,7 @@
 import supervisor
 supervisor.runtime.autoreload = False
 
+import time
 import busio
 import config
 import logging
@@ -14,6 +15,7 @@ spi = busio.SPI(config.SPI_SCK, MOSI=config.SPI_MOSI, MISO=config.SPI_MISO)
 
 
 def main():
+    time.sleep(config.STARTUP_DELAY_S)
     shared_spi = SharedSPI(spi, config.OPC_CS, config.LORA_CS)
     lora = LoRa(spi, config.KENTTAROVA_RFM_ADDRESS, config.GROUND_RFM_ADDRESS, shared_spi=shared_spi)
     sd_card = SDCard(spi, PAYLOAD_ID, shared_spi=shared_spi)

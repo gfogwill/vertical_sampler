@@ -50,3 +50,9 @@ HEARTBEAT_OFFSETS = {
 # minimize SD write activity during normal operation. DATA always persists
 # via Logger.data(), independent of this list.
 SD_LOG_LEVELS = ("WARNING", "ERROR")
+
+# Delay at the very start of main(), before any peripheral is touched.
+# The OPC-N3 has its own internal MCU that needs time to complete its own
+# boot sequence after power-up; probing it over SPI too early can leave it
+# in a state that only a physical reset recovers from.
+STARTUP_DELAY_S = 2.0

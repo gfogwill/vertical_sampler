@@ -210,6 +210,13 @@ class OPCN3:
         """
         OPC-N3 returns BUSY after a command. Keep sending the same command
         every 20 ms until READY is returned.
+
+        This entire loop runs inside the caller's `with self.device as spi:`
+        block, meaning the SPI bus is locked and this driver's CS is
+        asserted low for its whole duration (including the sleep(5) waits
+        below). Any logging here must not touch the SD card or force other
+        CS lines, since that would race with this still-active transaction.
+        Use print() only; never self._log()/self.logger here.
         """
         response = OPC_BUSY
         attempts = 0
@@ -224,10 +231,7 @@ class OPCN3:
                 )
 
             if attempts > 20:
-                self._log(
-                    "warning",
-                    "OPC stayed busy; waiting 5 s for SPI buffer recovery",
-                )
+                print("OPC-N3: stayed busy; waiting 5 s for SPI buffer recovery")
                 time.sleep(5)
 
             if attempts > 25:
