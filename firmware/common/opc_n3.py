@@ -147,7 +147,9 @@ class OPCN3:
     The caller creates the shared SPI bus. This allows OPC, SD card and
     RFM9x LoRa to share SCK/MOSI/MISO safely, each with its own CS pin.
     An optional shared_spi arbiter forces the other peripherals' CS
-    lines HIGH before every OPC transaction.
+    lines HIGH before every OPC transaction. When shared_spi is given,
+    its pre-created opc_cs DigitalInOut is reused instead of claiming
+    config.OPC_CS a second time.
     """
 
     def __init__(
@@ -162,7 +164,10 @@ class OPCN3:
         self.shared_spi = shared_spi
         self.warmup_s = warmup_s
 
-        self.cs = digitalio.DigitalInOut(config.OPC_CS)
+        if self.shared_spi is not None:
+            self.cs = self.shared_spi.opc_cs
+        else:
+            self.cs = digitalio.DigitalInOut(config.OPC_CS)
         self.device = SPIDevice(
             spi,
             self.cs,

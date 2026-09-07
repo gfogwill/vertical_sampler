@@ -6,7 +6,10 @@ import config
 class LoRa:
     def __init__(self, spi, node, destination, shared_spi=None):
         self.shared_spi = shared_spi
-        self.cs = digitalio.DigitalInOut(config.LORA_CS)
+        if self.shared_spi is not None:
+            self.cs = self.shared_spi.lora_cs
+        else:
+            self.cs = digitalio.DigitalInOut(config.LORA_CS)
         self.reset = digitalio.DigitalInOut(config.LORA_RESET_DUMMY)
         self._before_lora()
         self.rfm9x = adafruit_rfm9x.RFM9x(spi=spi, cs=self.cs, reset=self.reset, frequency=868)
