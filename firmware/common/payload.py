@@ -98,7 +98,7 @@ def main_loop(lora,payload_id,logger,spi=None,shared_spi=None):
     if spi is not None:
         try:
             opc=OPCN3(spi,logger,shared_spi=shared_spi)
-            opc.on(warmup=False)
+            opc.on(warmup=True)
         except Exception as e: opc=None; logger.warning("OPC-N3 unavailable: {}".format(e))
     else:
         logger.warning("OPC-N3 disabled: no shared SPI bus provided")

@@ -158,7 +158,7 @@ class OPCN3:
         logger=None,
         shared_spi=None,
         baudrate=500000,
-        warmup_s=5.0,
+        warmup_s=10.0,
     ):
         self.logger = logger
         self.shared_spi = shared_spi
