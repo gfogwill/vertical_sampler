@@ -60,6 +60,7 @@ LEGACY_SIZE = struct.calcsize(_FORMAT_LEGACY)
 
 INT_FILLVAL = -999999
 UNSIGNED_INT_FILLVAL = 4294967295
+UNSIGNED_SHORT_FILLVAL = 65535
 FLOAT_FILLVAL = -1e9
 _STR_LEN = 10
 _MSG_TYPE_LEN = 12
@@ -92,11 +93,14 @@ def dict2bytes(d: dict) -> bytes:
                     b = b + b"\x00" * (length - len(b))
                 tup.append(b)
         elif val is None:
-            tup.append(
-                UNSIGNED_INT_FILLVAL if fmt in ("L", "H") else
-                INT_FILLVAL if fmt == "i" else
-                FLOAT_FILLVAL
-            )
+            if fmt == "L":
+                tup.append(UNSIGNED_INT_FILLVAL)
+            elif fmt == "H":
+                tup.append(UNSIGNED_SHORT_FILLVAL)
+            elif fmt == "i":
+                tup.append(INT_FILLVAL)
+            else:
+                tup.append(FLOAT_FILLVAL)
         elif fmt in _INT_FMTS:
             # CircuitPython struct.pack does not coerce float->int.
             tup.append(int(val))

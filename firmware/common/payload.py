@@ -129,9 +129,13 @@ def main_loop(lora,payload_id,logger,spi=None,shared_spi=None):
                 if gps is not None: data.update(gps.fields())
                 logger.data(data)
             if now>=next_heartbeat:
+                next_heartbeat=now+config.HEARTBEAT_INTERVAL_S
                 data.update(_snapshot(payload_id,pump,valve,power,logger))
                 if gps is not None: data.update(gps.fields())
-                _send(lora,data,pack.MSG_TELEMETRY,status_led); logger.info("Heartbeat sent"); next_heartbeat=now+config.HEARTBEAT_INTERVAL_S
+                try:
+                    _send(lora,data,pack.MSG_TELEMETRY,status_led); logger.info("Heartbeat sent")
+                except Exception as e:
+                    logger.error("Heartbeat send failed: {}".format(e))
             status_led.tick(time.monotonic())
         except Exception as e:
             logger.error("LoRa loop error: {}".format(e)); status_led.error(); time.sleep(0.5)
