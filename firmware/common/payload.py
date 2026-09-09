@@ -26,7 +26,10 @@ def _snapshot(payload_id,pump,valve,power,logger):
     return data
 
 def _send(lora,data,typ,status_led):
-    packet=data.copy(); packet["msg_type"]=typ; lora.send(pack.dict2bytes(packet)); status_led.tx()
+    packet=data.copy(); packet["msg_type"]=typ
+    if not lora.send(pack.dict2bytes(packet)):
+        raise RuntimeError("LoRa transmit timed out")
+    status_led.tx()
 
 def _update_sht85(data,sensor,logger,status_led):
     try:
@@ -70,6 +73,7 @@ def _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,stat
     try:
         parts=msg.decode().strip().lower().split()
         if not parts: return
+        logger.info("Command received: "+" ".join(parts))
         command,args=parts[0],parts[1:]
         if command=="pump":
             if len(args)!=2: raise ValueError("pump requires: pump <front|back|both> <on|off>")

@@ -104,7 +104,16 @@ def _process_command(cmd_str):
     # Drain old/stale LoRa frames before issuing a new command.
     _drain_lora()
 
-    lora.send(" ".join(cmd).encode())
+    command_text = " ".join(cmd)
+    if not lora.send(command_text.encode()):
+        _print_json({
+            "error": "LoRa transmit timed out",
+            "stage": "ground_tx",
+            "payload_id": payload_id,
+            "command": command_text,
+        })
+        return
+    print("TX command -> {}: {}".format(payload_id, command_text))
 
     ack = None
     deadline = time.monotonic() + 20.0
@@ -143,7 +152,12 @@ def _process_command(cmd_str):
         led.blink(ntimes=6, bsleep=0.4, tsleep=0.2, esleep=0.4)
         _print_json(ack)
     else:
-        _print_json({"error": "no command ack"})
+        _print_json({
+            "error": "command transmitted but no payload acknowledgement received",
+            "stage": "payload_ack",
+            "payload_id": payload_id,
+            "command": command_text,
+        })
 
 
 while True:

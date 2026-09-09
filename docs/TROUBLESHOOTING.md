@@ -89,6 +89,33 @@ sudo usermod -a -G dialout $USER
 
 ---
 
+## Payload telemetry arrives but commands do not
+
+**Symptom:** Heartbeats from Alma, Beni or Carla appear at the ground station,
+but pump or valve commands do not appear in the payload terminal.
+
+Both the payload and ground-station Pico must be deployed from the same branch:
+
+```bash
+make update-alma   # or update-beni / update-carla
+make update-ground
+```
+
+The host now reports which stage failed:
+
+- `ground_tx: LoRa transmit timed out` means the ground radio did not complete
+  transmission. Check the ground RFM9x power, antenna, SPI wiring and module.
+- `payload_ack: command transmitted but no payload acknowledgement received`
+  means the ground radio completed transmission but the addressed payload did
+  not reply. Check the payload address, receiver wiring, antenna and power.
+- `Command received: ...` in the payload terminal confirms that the packet
+  reached the payload command handler.
+
+The ground terminal also prints `TX command -> <payload>: <command>` after a
+successful radio transmission.
+
+---
+
 ## `cp: error writing ... No space left on device` after flashing UF2
 
 **Symptom:** `make update-*` fails with:

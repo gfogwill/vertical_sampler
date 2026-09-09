@@ -294,6 +294,10 @@ def _read_cmd_response(ser, timeout_s, accept_telemetry=False, expected_payload=
             if text.startswith("{"):
                 try:
                     d = json.loads(text)
+                    if d.get("error"):
+                        stage = d.get("stage", "ground_bridge")
+                        d["_error"] = "{}: {}".format(stage, d["error"])
+                        return d
                     msg_type = d.get("msg_type", _MSG_TELEMETRY)
                     if (
                         expected_payload is not None
@@ -362,7 +366,11 @@ def relay_cmd(args):
                 expected_payload=args.payload,
             )
             if data is not None:
-                print(" OK" if data.get("msg_type") != _MSG_CMD_ERR else " ERROR")
+                is_error = "_error" in data or data.get("msg_type") == _MSG_CMD_ERR
+                print(" ERROR" if is_error else " OK")
+                if "_error" in data:
+                    print(json.dumps(data, indent=2))
+                    return
                 if args.subcommand == "data":
                     _enrich_data(data, args.payload)
                     pretty_print(data, payload_id=str(args.payload))

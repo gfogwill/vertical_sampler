@@ -5,6 +5,7 @@ import types
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
+import json
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -126,6 +127,31 @@ class PayloadCapabilityTests(unittest.TestCase):
             pump.set_state("back", "on")
         with self.assertRaises(ValueError):
             pump.set_state("both", "on")
+
+    def test_ground_bridge_errors_are_returned_immediately(self):
+        message = {
+            "error": "command transmitted but no payload acknowledgement received",
+            "stage": "payload_ack",
+            "payload_id": "alma",
+        }
+
+        class FakeSerial:
+            in_waiting = 1
+
+            def readline(self):
+                self.in_waiting = 0
+                return (json.dumps(message) + "\n").encode()
+
+        response = cli._read_cmd_response(
+            FakeSerial(),
+            timeout_s=0.1,
+            expected_payload=cli.Payload.ALMA,
+        )
+
+        self.assertEqual(
+            response["_error"],
+            "payload_ack: command transmitted but no payload acknowledgement received",
+        )
 
 
 if __name__ == "__main__":

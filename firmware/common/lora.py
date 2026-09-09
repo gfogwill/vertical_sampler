@@ -20,7 +20,7 @@ class LoRa:
             self.shared_spi.before_lora()
     def send(self, msg):
         self._before_lora()
-        return self.rfm9x.send(msg)
+        return self.rfm9x.send(msg, keep_listening=True)
     def receive(self, timeout=1):
         self._before_lora()
         return self.rfm9x.receive(timeout=timeout)
