@@ -1,5 +1,6 @@
 import time
 import busio
+import digitalio
 import config
 import led
 import pack
@@ -10,7 +11,6 @@ from power import PowerMonitor
 from safety import SafetyInterlock
 from sht85 import Sht85Sensor
 from pressure_sensor import PressureSensor
-from opc_n3 import OPCN3
 
 SHT85_INTERVAL_S=10.0
 PRESSURE_INTERVAL_S=10.0
@@ -18,7 +18,7 @@ FLOW_INTERVAL_S=10.0
 OPC_HISTOGRAM_INTERVAL_S=10.0
 
 def _snapshot(payload_id,pump,valve,power,logger):
-    data={"payload_id":payload_id,"pump_front_state":pump.front_state(),"pump_back_state":pump.back_state(),"valve_state":valve.state()}
+    data={"payload_id":payload_id,"pump_front_state":pump.front_state(),"pump_back_state":pump.back_state(),"valve_state":valve.state() if valve is not None else None}
     try: data["battery_voltage"]=power.battery_voltage()
     except Exception as e: data["battery_voltage"]=None; logger.warning("Battery read failed: {}".format(e))
     try: data["cpu_temperature"]=power.cpu_temperature()
@@ -70,23 +70,38 @@ def _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,stat
     try:
         parts=msg.decode().strip().lower().split()
         if not parts: return
-        command,args=parts[0],parts[1:]; on=(command=="pump" and len(args)==2 and args[1]=="on") or (command=="valve" and len(args)==1 and args[0]=="on")
-        if safety.locked and on: raise ValueError("safety interlock active")
+        command,args=parts[0],parts[1:]
         if command=="pump":
             if len(args)!=2: raise ValueError("pump requires: pump <front|back|both> <on|off>")
+            if args[0] not in ("front","back","both"): raise ValueError("pump location: front, back, or both")
+            if args[1] not in ("on","off"): raise ValueError("pump state: on or off")
+            if not pump.supports(args[0]): raise ValueError("pump {} is not installed".format(args[0]))
+        elif command=="valve":
+            if valve is None: raise ValueError("valve is not installed")
+            if len(args)!=1: raise ValueError("valve requires: valve <on|off>")
+            if args[0] not in ("on","off"): raise ValueError("valve state: on or off")
+        elif command!="data": raise ValueError("unknown command: "+command)
+        on=(command=="pump" and args[1]=="on") or (command=="valve" and args[0]=="on")
+        if safety.locked and on: raise ValueError("safety interlock active")
+        if command=="pump":
             pump.set_state(args[0],args[1])
         elif command=="valve":
-            if len(args)!=1: raise ValueError("valve requires: valve <on|off>")
             valve.set_state(args[0])
-        elif command!="data": raise ValueError("unknown command: "+command)
         data.update(_snapshot(payload_id,pump,valve,power,logger)); _send(lora,data,pack.MSG_COMMAND_ACK,status_led); logger.info("cmd_ack: "+" ".join(parts))
     except Exception as e:
         logger.error("Command error: {}".format(e)); data.update(_snapshot(payload_id,pump,valve,power,logger))
         try: _send(lora,data,pack.MSG_COMMAND_ERROR,status_led)
         except Exception as x: logger.error("cmd_err send failed: {}".format(x))
 
-def main_loop(lora,payload_id,logger,spi=None,shared_spi=None):
-    pump=Pump(logger); valve=Valve(logger); power=PowerMonitor(logger); safety=SafetyInterlock(logger); status_led=led.StatusLed(logger)
+def main_loop(lora,payload_id,logger,spi=None,shared_spi=None,pump_locations=("front","back"),has_valve=True,has_opc=True):
+    pump=Pump(logger,locations=pump_locations)
+    valve=Valve(logger) if has_valve else None
+    disabled_valve_output=None
+    if not has_valve:
+        disabled_valve_output=digitalio.DigitalInOut(config.ELECTROVALVE)
+        disabled_valve_output.switch_to_output(value=False)
+        logger.info("Electro-valve output held off: valve not installed")
+    power=PowerMonitor(logger); safety=SafetyInterlock(logger); status_led=led.StatusLed(logger)
     i2c=busio.I2C(scl=config.I2C_SCL,sda=config.I2C_SDA); sht85=Sht85Sensor(logger,i2c)
     try: pressure_sensor=PressureSensor(logger,i2c)
     except Exception as e: pressure_sensor=None; logger.warning("Pressure sensor unavailable: {}".format(e))
@@ -95,12 +110,13 @@ def main_loop(lora,payload_id,logger,spi=None,shared_spi=None):
     try: gps=Gps(logger)
     except Exception as e: gps=None; logger.warning("GPS unavailable: {}".format(e))
     opc=None
-    if spi is not None:
+    if has_opc and spi is not None:
         try:
+            from opc_n3 import OPCN3
             opc=OPCN3(spi,logger,shared_spi=shared_spi)
             opc.on(warmup=True)
         except Exception as e: opc=None; logger.warning("OPC-N3 unavailable: {}".format(e))
-    else:
+    elif has_opc:
         logger.warning("OPC-N3 disabled: no shared SPI bus provided")
     data=_snapshot(payload_id,pump,valve,power,logger); data["flow"]=None; data["rssi"]=None
     for i in range(24): data["opc_bin_{}".format(i)]=None
@@ -109,7 +125,10 @@ def main_loop(lora,payload_id,logger,spi=None,shared_spi=None):
     now=time.monotonic(); next_heartbeat=now+config.HEARTBEAT_OFFSETS.get(payload_id,0); next_safety=now
     next_sht85=now; next_pressure=now+2.0; next_flow=now+4.0
     next_opc_histogram=now+6.0 if opc is not None else None
-    logger.info("LoRa actuator, power, GPS, safety, SHT85, pressure, flow, OPC-N3, and LED payload ready")
+    capabilities=["pump {}".format("/".join(pump_locations))]
+    if has_valve: capabilities.append("valve")
+    if has_opc: capabilities.append("OPC-N3")
+    logger.info("Payload ready: "+", ".join(capabilities)+", power, GPS, safety, SHT85, pressure, flow, and LED")
     while True:
         try:
             now=time.monotonic(); status_led.tick(now)

@@ -27,8 +27,14 @@ LORA_RESET_DUMMY = board.GP14
 
 # LoRa node addresses
 GROUND_RFM_ADDRESS = 0x47
-KENTTAROVA_RFM_ADDRESS = 0x71
-MATOROVA_RFM_ADDRESS = 0x93
+BENI_RFM_ADDRESS = 0x71
+ALMA_RFM_ADDRESS = 0x93
+CARLA_RFM_ADDRESS = 0x72
+PAYLOAD_RFM_ADDRESSES = {
+    "alma": ALMA_RFM_ADDRESS,
+    "beni": BENI_RFM_ADDRESS,
+    "carla": CARLA_RFM_ADDRESS,
+}
 
 FLOW_DIVIDER_RATIO = 32.6 / (10.0 + 32.6)
 FLOW_FULL_SCALE_V = 4.0
@@ -42,8 +48,9 @@ CPU_TEMP_CRITICAL_C = 55.0
 WATCHDOG_TIMEOUT_S = 30
 HEARTBEAT_INTERVAL_S = 60
 HEARTBEAT_OFFSETS = {
-    "matorova": 0,
-    "kenttarova": 30,
+    "alma": 0,
+    "beni": 20,
+    "carla": 40,
 }
 
 # Log levels persisted to SD. INFO/DEBUG are printed to console only, to

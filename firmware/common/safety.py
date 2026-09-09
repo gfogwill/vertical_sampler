@@ -17,8 +17,9 @@ class SafetyInterlock:
         )
 
         if critical:
-            pump.set_state("both", "off")
-            valve.set_state("off")
+            pump.stop()
+            if valve is not None:
+                valve.set_state("off")
             if not self.locked:
                 self._logger.error(
                     "Safety interlock: battery={:.2f} V cpu={:.1f} C".format(

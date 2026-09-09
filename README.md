@@ -2,7 +2,9 @@
 
 Firmware, hardware and host software for a balloon-borne vertical air sampler for Ice Nucleating Particle (INP) collection.
 
-Payload and ground-station Raspberry Pi Pico W boards run **CircuitPython** and communicate over **LoRa at 868 MHz**. The system supports two payload identities: `kenttarova` and `matorova`.
+Payload and ground-station Raspberry Pi Pico W boards run **CircuitPython** and
+communicate over **LoRa at 868 MHz**. The system supports the airborne payloads
+`alma` and `beni`, plus the ground-operated payload `carla`.
 
 ## System Overview
 
@@ -14,7 +16,8 @@ Payload and ground-station Raspberry Pi Pico W boards run **CircuitPython** and 
 │  - GPS (+ RTC sync)     │                             │  - Receives telemetry   │
 │  - SHT85 RH/temp sensor │                             │  - Relays to PC via USB │
 │  - LPS25H pressure      │                             │  - Forwards commands    │
-│  - Pumps + electrovalve │                             └─────────────────────────┘
+│  - Pumps + optional     │                             └─────────────────────────┘
+│    electrovalve / OPC   │
 │  - SD logging           │                                         │
 │  - Battery + flow meter │                                    USB Serial
 │  - Watchdog             │                                         │
@@ -41,8 +44,9 @@ vertical_sampler/
 │   │   ├── led.py
 │   │   ├── adafruit_gps.py      # Vendored CircuitPython dependency
 │   │   └── adafruit_rfm9x.py    # Vendored CircuitPython dependency
-│   ├── kenttarova_main.py       # kenttarova payload entry point
-│   ├── matorova_main.py         # matorova payload entry point
+│   ├── alma_main.py             # Alma airborne payload entry point
+│   ├── beni_main.py             # Beni airborne payload entry point
+│   ├── carla_main.py            # Carla ground payload entry point
 │   └── ground_main.py           # Ground-station entry point
 ├── host/                        # Python 3 programs running on the control PC
 │   ├── cli.py
@@ -64,11 +68,12 @@ import pack
 
 ## Payload Identities
 
-| Unit | LoRa node address | Entry point |
-|---|---:|---|
-| Ground station | `0x47` | `firmware/ground_main.py` |
-| kenttarova | `0x71` | `firmware/kenttarova_main.py` |
-| matorova | `0x93` | `firmware/matorova_main.py` |
+| Unit | LoRa node address | Hardware | Entry point |
+|---|---:|---|---|
+| Ground station | `0x47` | Serial/LoRa bridge | `firmware/ground_main.py` |
+| Alma | `0x93` | Two pumps, electro-valve, OPC-N3 | `firmware/alma_main.py` |
+| Beni | `0x71` | Two pumps, electro-valve, OPC-N3 | `firmware/beni_main.py` |
+| Carla | `0x72` | Front pump only; no electro-valve or OPC-N3 | `firmware/carla_main.py` |
 
 Addresses, GPIO assignments, calibration constants and safety limits are defined centrally in `firmware/common/config.py`.
 
@@ -97,8 +102,9 @@ export CIRCUITPY_PATH=/media/$USER/CIRCUITPY
 Deploy the required device image:
 
 ```bash
-make update-kenttarova
-make update-matorova
+make update-alma
+make update-beni
+make update-carla
 make update-ground
 ```
 
@@ -113,14 +119,17 @@ Each target:
 Run commands from the host computer:
 
 ```bash
-python host/cli.py kenttarova data
-python host/cli.py kenttarova pump front on
-python host/cli.py kenttarova pump back off
-python host/cli.py kenttarova valve on
-python host/cli.py matorova data
+python host/cli.py data alma
+python host/cli.py pump alma front on
+python host/cli.py pump beni back off
+python host/cli.py valve beni on
+python host/cli.py data carla
+python host/cli.py pump carla front on
 ```
 
 `host/quickview.py` is available for local data inspection and visualization.
+It displays separate OPC-N3 histogram heatmaps for Alma and Beni. Carla is
+included in the common sensor plots but has no OPC or electro-valve controls.
 
 The host dashboards automatically use the latest sea-level pressure observation
 from FMI station `Kittilä Matorova` (`fmisid=101985`) as QNH. The value is
@@ -139,7 +148,7 @@ Each payload sample is logged as JSONL when an SD card is available and sent ove
 | Field | Type | Description |
 |---|---|---|
 | `msg_type` | str | `telemetry`, `cmd_ack` or `cmd_err` |
-| `payload_id` | str | `kenttarova` or `matorova` |
+| `payload_id` | str | `alma`, `beni` or `carla` |
 | `rtc_time` | str | RTC timestamp in ISO 8601 format |
 | `gps_time` | uint32/null | GPS UTC Unix epoch |
 | `gps_latitude` | float/null | Degrees |
@@ -154,8 +163,13 @@ Each payload sample is logged as JSONL when an SD card is available and sent ove
 | `flow` | float | Standard L/min |
 | `rssi` | int | Last received LoRa RSSI |
 | `pump_front_state` | int | 0 or 1 |
-| `pump_back_state` | int | 0 or 1 |
-| `valve_state` | int | 0 or 1 |
+| `pump_back_state` | int/null | 0 or 1; unavailable on Carla |
+| `valve_state` | int/null | 0 or 1; unavailable on Carla |
+
+The binary telemetry format remains identical for all payloads. Carla sends
+fill values for the unavailable back pump, electro-valve and OPC-N3 fields.
+Commands targeting those unavailable devices are rejected by both the host
+CLI and Carla firmware.
 
 > **RTC synchronization:** on the first valid GPS fix, the payload sets the onboard RTC to GPS UTC. Subsequent `rtc_time` values remain valid even if the GPS temporarily loses its fix.
 

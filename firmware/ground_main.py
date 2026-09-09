@@ -96,12 +96,10 @@ def _process_command(cmd_str):
         raise UnexpectedCommand("too few parts")
 
     payload_id, *cmd = parts
-    if payload_id == "kenttarova":
-        lora.set_destination(config.KENTTAROVA_RFM_ADDRESS)
-    elif payload_id == "matorova":
-        lora.set_destination(config.MATOROVA_RFM_ADDRESS)
-    else:
+    destination = config.PAYLOAD_RFM_ADDRESSES.get(payload_id)
+    if destination is None:
         raise UnexpectedCommand("unknown payload: " + payload_id)
+    lora.set_destination(destination)
 
     # Drain old/stale LoRa frames before issuing a new command.
     _drain_lora()

@@ -17,8 +17,9 @@ else:
 
 
 class Payload(Enum):
-    MATOROVA = "matorova"
-    KENTTAROVA = "kenttarova"
+    ALMA = "alma"
+    BENI = "beni"
+    CARLA = "carla"
 
     def __str__(self) -> str:
         return self.value
@@ -34,6 +35,7 @@ class State(Enum):
 
 FILL_INT = -999999
 FILL_UINT = 4294967295
+FILL_USHORT = 65535
 FILL_FLOAT = -1e9
 
 PAYLOAD_CYCLE_S = 35
@@ -78,21 +80,29 @@ FIELDS = [
 
 GROUP_ORDER = ["GPS", "Atmosphere", "Sampler", "OPC", "System"]
 
-# Control key map: key -> (payload_index, actuator, label)
-# Uppercase = matorova (index 0), lowercase = kenttarova (index 1)
+# Control key map: key -> (payload, actuator, location)
 _CTRL_KEYS = {
-    ord('F'): (0, "pump", "front"),
-    ord('f'): (1, "pump", "front"),
-    ord('B'): (0, "pump", "back"),
-    ord('b'): (1, "pump", "back"),
-    ord('V'): (0, "valve", None),
-    ord('v'): (1, "valve", None),
+    ord('F'): (Payload.ALMA, "pump", "front"),
+    ord('f'): (Payload.BENI, "pump", "front"),
+    ord('B'): (Payload.ALMA, "pump", "back"),
+    ord('b'): (Payload.BENI, "pump", "back"),
+    ord('V'): (Payload.ALMA, "valve", None),
+    ord('v'): (Payload.BENI, "valve", None),
+    ord('C'): (Payload.CARLA, "pump", "front"),
+    ord('c'): (Payload.CARLA, "pump", "front"),
+}
+
+_PAYLOAD_CAPABILITIES = {
+    Payload.ALMA: {"pump_front", "pump_back", "valve", "opc"},
+    Payload.BENI: {"pump_front", "pump_back", "valve", "opc"},
+    Payload.CARLA: {"pump_front"},
 }
 
 # Per-payload additive pressure offsets (hPa) calibrated against TSI 4100 reference
 _PRESSURE_OFFSET_HPA = {
-    Payload.MATOROVA: +2.1,     # offset = P_TSI_4100 - P_sensor_crudo (medido en calibración)
-    Payload.KENTTAROVA: -1.9,
+    Payload.ALMA: +2.1,
+    Payload.BENI: -1.9,
+    Payload.CARLA: 0.0,  # Not yet calibrated against the TSI 4100 reference.
 }
 
 
@@ -117,6 +127,8 @@ def _fmt_value(key, val):
         return "N/A", True
     if isinstance(val, int) and val in (FILL_INT, FILL_UINT):
         return "N/A", True
+    if key.startswith("opc_bin_") and val == FILL_USHORT:
+        return "N/A", True
     if key == "gps_time":
         try:
             ts = datetime.datetime.fromtimestamp(val, tz=_UTC)
@@ -130,6 +142,29 @@ def _fmt_value(key, val):
     if isinstance(val, float):
         return "{:.2f}".format(val), False
     return str(val), False
+
+
+def _payload_from_id(payload_id):
+    try:
+        return payload_id if isinstance(payload_id, Payload) else Payload(payload_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def _field_supported(payload_id, key):
+    payload = _payload_from_id(payload_id)
+    capabilities = _PAYLOAD_CAPABILITIES.get(payload)
+    if capabilities is None:
+        return True
+    if key == "pump_front_state":
+        return "pump_front" in capabilities
+    if key == "pump_back_state":
+        return "pump_back" in capabilities
+    if key == "valve_state":
+        return "valve" in capabilities
+    if key.startswith("opc_") or key == "_opc_bin_total":
+        return "opc" in capabilities
+    return True
 
 
 def pretty_print(data, payload_id=""):
@@ -146,8 +181,11 @@ def pretty_print(data, payload_id=""):
     for key, label, unit, group in FIELDS:
         if key.startswith("_"):
             continue
+        if not _field_supported(payload_id, key):
+            continue
         grouped[group].append((key, label, unit))
-    for g_idx, group in enumerate(GROUP_ORDER):
+    visible_groups = [group for group in GROUP_ORDER if grouped[group]]
+    for g_idx, group in enumerate(visible_groups):
         group_title = " " + group
         lines.append("\u2551 " + group_title.ljust(COL_LABEL) + " \u2551 " + " " * COL_VALUE + " \u2551 " + " " * COL_UNIT + " \u2551")
         for key, label, unit in grouped[group]:
@@ -162,7 +200,7 @@ def pretty_print(data, payload_id=""):
                 " \u2551 " + val_str.rjust(COL_VALUE) +
                 " \u2551 " + unit.ljust(COL_UNIT) + " \u2551"
             )
-        if g_idx < len(GROUP_ORDER) - 1:
+        if g_idx < len(visible_groups) - 1:
             lines.append("\u2560" + "\u2550" * (COL_LABEL + 2) + "\u256c" + "\u2550" * (COL_VALUE + 2) + "\u256c" + "\u2550" * (COL_UNIT + 2) + "\u2563")
     lines.append("\u255a" + "\u2550" * (COL_LABEL + 2) + "\u2569" + "\u2550" * (COL_VALUE + 2) + "\u2569" + "\u2550" * (COL_UNIT + 2) + "\u255d")
     print("\n" + "\n".join(lines) + "\n")
@@ -188,6 +226,23 @@ def _build_cmd(args):
         return "{} {}\n".format(args.payload, args.subcommand).encode()
     else:
         raise ValueError("Unknown subcommand: {}".format(args.subcommand))
+
+
+def _validate_command_capability(args):
+    capabilities = _PAYLOAD_CAPABILITIES[args.payload]
+    if args.subcommand == "valve" and "valve" not in capabilities:
+        raise ValueError("{} has no electro-valve".format(args.payload))
+    if args.subcommand == "pump":
+        requested = (
+            ("front", "back")
+            if args.pump_location == "both"
+            else (args.pump_location,)
+        )
+        for location in requested:
+            if "pump_{}".format(location) not in capabilities:
+                raise ValueError(
+                    "{} has no {} pump".format(args.payload, location)
+                )
 
 
 def _read_json_line(ser, timeout_s):
@@ -262,7 +317,7 @@ def _opc_bin_total(d):
     found = False
     for i in range(24):
         v = d.get("opc_bin_{}".format(i))
-        if v is None or (isinstance(v, int) and v == FILL_UINT):
+        if v is None or (isinstance(v, int) and v in (FILL_UINT, FILL_USHORT)):
             continue
         total += v
         found = True
@@ -288,6 +343,7 @@ def _known_binary_state(data, key):
 
 
 def relay_cmd(args):
+    _validate_command_capability(args)
     cmd = _build_cmd(args)
     is_data = (args.subcommand == "data")
     max_attempts = MAX_RETRIES if is_data else 1
@@ -332,7 +388,7 @@ def relay_cmd(args):
 # ---------------------------------------------------------------------------
 
 MAX_EVENTS = 8
-_PAYLOADS_ALL = [Payload.MATOROVA, Payload.KENTTAROVA]
+_PAYLOADS_ALL = [Payload.ALMA, Payload.BENI, Payload.CARLA]
 
 _CMD_POLL_ALL = "poll_all"
 _CMD_POLL_ONE = "poll_one"
@@ -496,8 +552,12 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows):
     row += 1
     grouped = {g: [] for g in GROUP_ORDER}
     for key, label, unit, group in FIELDS:
+        if not _field_supported(payload_label, key):
+            continue
         grouped[group].append((key, label, unit))
     for group in GROUP_ORDER:
+        if not grouped[group]:
+            continue
         if row >= max_rows:
             break
         _safe_addnstr(win, row, col_x, " {}".format(group).ljust(col_w), col_w,
@@ -657,9 +717,8 @@ def _run_monitor(payloads, qnh, log_file, auto_qnh=True):
                               " {} {}".format(t_str, evt_msg).ljust(cols - 1),
                               cols - 1, curses.color_pair(1))
 
-            footer = (" F/f=pump front  B/b=pump back  V/v=valve "
-                      "(UPPER=matorova lower=kenttarova)  "
-                      "r=poll all  1/2=poll  q=quit")
+            footer = (" Alma: F/B/V  Beni: f/b/v  Carla: C=front pump  "
+                      "r=poll all  1/2/3=poll  q=quit")
             try:
                 stdscr.addnstr(rows - 1, 0, footer.ljust(cols - 1), cols - 1,
                                curses.color_pair(2) | curses.A_REVERSE)
@@ -682,10 +741,12 @@ def _run_monitor(payloads, qnh, log_file, auto_qnh=True):
             elif ch == ord('2') and len(payloads) >= 2:
                 worker.cmd_q.put((_CMD_POLL_ONE, payloads[1]))
                 add_event("Polling {}...".format(payloads[1]))
+            elif ch == ord('3') and len(payloads) >= 3:
+                worker.cmd_q.put((_CMD_POLL_ONE, payloads[2]))
+                add_event("Polling {}...".format(payloads[2]))
             elif ch in _CTRL_KEYS:
-                p_idx, actuator, location = _CTRL_KEYS[ch]
-                if p_idx < len(payloads):
-                    p = payloads[p_idx]
+                p, actuator, location = _CTRL_KEYS[ch]
+                if p in payloads:
                     if actuator == "pump":
                         _toggle_pump(p, location)
                     elif actuator == "valve":
@@ -726,8 +787,8 @@ def parse_args():
         p.add_argument("payload", type=Payload, choices=list(Payload))
         if sub_name == "pump":
             p.add_argument("pump_location", type=str, choices=["front", "back", "both"])
-        p.add_argument("state", type=State, choices=list(State)) if sub_name != "pump" else None
-        if sub_name == "pump":
+            p.add_argument("state", type=State, choices=list(State))
+        elif sub_name == "valve":
             p.add_argument("state", type=State, choices=list(State))
 
     mon = subparsers.add_parser("monitor", help="Live TUI dashboard")
@@ -762,4 +823,7 @@ if __name__ == "__main__":
             auto_qnh=not args.no_auto_qnh,
         )
     else:
-        relay_cmd(args)
+        try:
+            relay_cmd(args)
+        except ValueError as exc:
+            raise SystemExit("ERROR: {}".format(exc))

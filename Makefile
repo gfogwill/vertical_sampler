@@ -20,13 +20,17 @@ download-nuke:
 
 # --- Deploy targets ---
 
-update-kenttarova: update-firmware
-	cp firmware/kenttarova_main.py $(CIRCUITPY_PATH)/main.py
-	@echo "Deployed kenttarova to $(CIRCUITPY_PATH)"
+update-beni: update-firmware
+	cp firmware/beni_main.py $(CIRCUITPY_PATH)/main.py
+	@echo "Deployed Beni to $(CIRCUITPY_PATH)"
 
-update-matorova: update-firmware
-	cp firmware/matorova_main.py $(CIRCUITPY_PATH)/main.py
-	@echo "Deployed matorova to $(CIRCUITPY_PATH)"
+update-alma: update-firmware
+	cp firmware/alma_main.py $(CIRCUITPY_PATH)/main.py
+	@echo "Deployed Alma to $(CIRCUITPY_PATH)"
+
+update-carla: update-firmware
+	cp firmware/carla_main.py $(CIRCUITPY_PATH)/main.py
+	@echo "Deployed Carla to $(CIRCUITPY_PATH)"
 
 update-ground: update-firmware
 	cp firmware/ground_main.py $(CIRCUITPY_PATH)/main.py

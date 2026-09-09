@@ -7,7 +7,7 @@ python host/quickview.py --log-file ground_dump.jsonl
 python host/quickview.py -f ground_dump.jsonl --qnh 1015.7 --max-points 600
 
 Supported JSON line formats:
-- {"pc_time": "...", "payload": "matorova", "data": {...}} (wrapped)
+- {"pc_time": "...", "payload": "alma", "data": {...}} (wrapped)
 - {...} with "payload_id" inside (flat, cli.py format)
 
 Panels (top to bottom, shared local-time X axis):
@@ -17,8 +17,9 @@ Panels (top to bottom, shared local-time X axis):
 3. Altitude (m) -> GPS (solid) vs pressure-derived via QNH (dashed)
 4. Relative humidity (%)
 5. Flow (L/min, left axis) + cumulative sampled volume (L, right axis)
-6. OPC-N3 size-distribution heatmap (kenttarova only): time x bin (0-23), raw counts
-7. OPC-N3 scalars (kenttarova only): temperature / humidity / sample flow + laser status
+6. Alma OPC-N3 size-distribution heatmap: time x bin (0-23), raw counts
+7. Beni OPC-N3 size-distribution heatmap: time x bin (0-23), raw counts
+8. Alma and Beni OPC-N3 scalars: temperature / humidity / sample flow + laser status
 """
 
 import argparse
@@ -40,12 +41,14 @@ else:
 # ---------------------------------------------------------------------------
 # General configuration
 # ---------------------------------------------------------------------------
-PAYLOADS = ["matorova", "kenttarova"]
+PAYLOADS = ["alma", "beni", "carla"]
+OPC_PAYLOADS = ["alma", "beni"]
 
 # "Flight instrument" palette: cyan and amber on near-black background
 PAYLOAD_COLORS = {
-    "matorova": "#39C8E8",    # cyan
-    "kenttarova": "#F5A623",  # amber
+    "alma": "#39C8E8",   # cyan
+    "beni": "#F5A623",   # amber
+    "carla": "#3DDC84",  # green
 }
 
 BAT_WARN_V = 19.8
@@ -57,7 +60,9 @@ MIN_VALID_YEAR = 2024        # minimum year to trust rtc_time (factory default i
 MAX_ANCHOR_GAP_S = 6 * 3600  # discard reconstructed timestamps drifting further than this
 
 FILL_UINT = 4294967295
+FILL_USHORT = 65535
 FILL_INT = -999999
+FILL_FLOAT = -1e9
 
 
 def parse_args():
@@ -143,16 +148,16 @@ class QuickView:
     # ------------------------------------------------------------------
     def _build_figure(self):
         pal = self.palette
-        self.fig = plt.figure(figsize=(19, 17.5), facecolor=pal["bg"])
+        self.fig = plt.figure(figsize=(19, 19.5), facecolor=pal["bg"])
         try:
             self.fig.canvas.manager.set_window_title("QuickView - vertical_sampler")
         except Exception:
             pass
 
-        # 8 rows: original 6 + OPC-N3 heatmap + OPC-N3 scalars (kenttarova only)
+        # 9 rows: original 6 + separate Alma/Beni OPC heatmaps + shared scalars.
         gs = gridspec.GridSpec(
-            8, 1, figure=self.fig,
-            height_ratios=[1, 1, 0.85, 1, 0.85, 1.05, 1.3, 1],
+            9, 1, figure=self.fig,
+            height_ratios=[1, 1, 0.85, 1, 0.85, 1.05, 1.15, 1.15, 1],
             hspace=0.32,
             left=0.075, right=0.965, top=0.955, bottom=0.055,
         )
@@ -163,12 +168,16 @@ class QuickView:
         self.ax_alt = self.fig.add_subplot(gs[3], sharex=self.ax_batt)
         self.ax_hum = self.fig.add_subplot(gs[4], sharex=self.ax_batt)
         self.ax_flow = self.fig.add_subplot(gs[5], sharex=self.ax_batt)
-        self.ax_opc_heat = self.fig.add_subplot(gs[6], sharex=self.ax_batt)
-        self.ax_opc_scalars = self.fig.add_subplot(gs[7], sharex=self.ax_batt)
+        self.ax_opc_heat = {
+            "alma": self.fig.add_subplot(gs[6], sharex=self.ax_batt),
+            "beni": self.fig.add_subplot(gs[7], sharex=self.ax_batt),
+        }
+        self.ax_opc_scalars = self.fig.add_subplot(gs[8], sharex=self.ax_batt)
 
         self.time_axes = [self.ax_batt, self.ax_temp, self.ax_press,
                            self.ax_alt, self.ax_hum, self.ax_flow,
-                           self.ax_opc_heat, self.ax_opc_scalars]
+                           self.ax_opc_heat["alma"], self.ax_opc_heat["beni"],
+                           self.ax_opc_scalars]
 
         self.ax_vol = self.ax_flow.twinx()
         self.ax_opc_laser = self.ax_opc_scalars.twinx()
@@ -178,13 +187,17 @@ class QuickView:
             for spine in ax.spines.values():
                 spine.set_color(pal["grid"])
 
-        # OPC-N3 heatmap: 24 size bins x time, raw counts, kenttarova only.
+        # OPC-N3 heatmaps: 24 size bins x time, one for each airborne payload.
         # pcolormesh needs a full redraw each frame (no incremental set_data),
         # so we keep it cheap by capping resolution via OPC_HEATMAP_MAX_COLS.
-        self._opc_bin_history = deque(maxlen=None)   # list of 24-value rows
-        self._opc_time_history = deque(maxlen=None)  # matching datetimes
-        self._opc_mesh = None
-        self._opc_colorbar = None
+        self._opc_bin_history = {
+            p: deque(maxlen=self.max_points) for p in OPC_PAYLOADS
+        }
+        self._opc_time_history = {
+            p: deque(maxlen=self.max_points) for p in OPC_PAYLOADS
+        }
+        self._opc_mesh = {p: None for p in OPC_PAYLOADS}
+        self._opc_colorbar = {p: None for p in OPC_PAYLOADS}
 
         self._init_lines()
         self._style_axes()
@@ -212,21 +225,22 @@ class QuickView:
         make(self.ax_flow, "flow")
         make(self.ax_vol, "volume_l", linestyle="--", alpha=0.9)
 
-        # OPC-N3 scalars: kenttarova only, single-payload lines (no per-payload loop).
-        opc_color = PAYLOAD_COLORS["kenttarova"]
-        (self.opc_temp_line,) = self.ax_opc_scalars.plot(
-            [], [], color=opc_color, linewidth=1.8, linestyle="-", label="temp"
-        )
-        (self.opc_hum_line,) = self.ax_opc_scalars.plot(
-            [], [], color=opc_color, linewidth=1.6, linestyle="--", alpha=0.8, label="humidity"
-        )
-        (self.opc_flow_line,) = self.ax_opc_scalars.plot(
-            [], [], color=opc_color, linewidth=1.4, linestyle=":", alpha=0.85, label="sample flow"
-        )
-        (self.opc_laser_line,) = self.ax_opc_laser.plot(
-            [], [], color=self.palette["crit"], linewidth=1.2, linestyle="-",
-            drawstyle="steps-post", alpha=0.9, label="laser"
-        )
+        self.opc_lines = defaultdict(dict)
+        for payload in OPC_PAYLOADS:
+            color = PAYLOAD_COLORS[payload]
+            (self.opc_lines["opc_temperature"][payload],) = self.ax_opc_scalars.plot(
+                [], [], color=color, linewidth=1.8, linestyle="-"
+            )
+            (self.opc_lines["opc_humidity"][payload],) = self.ax_opc_scalars.plot(
+                [], [], color=color, linewidth=1.6, linestyle="--", alpha=0.8
+            )
+            (self.opc_lines["opc_sample_flow"][payload],) = self.ax_opc_scalars.plot(
+                [], [], color=color, linewidth=1.4, linestyle=":", alpha=0.85
+            )
+            (self.opc_lines["opc_laser_status"][payload],) = self.ax_opc_laser.plot(
+                [], [], color=color, linewidth=1.2, linestyle="-.",
+                drawstyle="steps-post", alpha=0.9
+            )
 
     def _style_axes(self):
         pal = self.palette
@@ -249,7 +263,8 @@ class QuickView:
             (self.ax_alt, "ALTITUDE\n(m)"),
             (self.ax_hum, "HUMIDITY\n(%)"),
             (self.ax_flow, "FLOW\n(L/min)"),
-            (self.ax_opc_heat, "OPC BIN\n(0-23)"),
+            (self.ax_opc_heat["alma"], "ALMA OPC\nBIN 0-23"),
+            (self.ax_opc_heat["beni"], "BENI OPC\nBIN 0-23"),
             (self.ax_opc_scalars, "OPC\n(C, %RH)"),
         ]
         for ax, label in ylabels:
@@ -272,9 +287,11 @@ class QuickView:
             transform=self.ax_flow.transAxes, fontsize=7.5,
             color=pal["text_muted"], ha="right", va="top", fontfamily="monospace",
         )
-        self.ax_opc_heat.text(0.995, 0.94, "kenttarova raw bin counts", transform=self.ax_opc_heat.transAxes,
-                               fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
-        self.ax_opc_scalars.text(0.995, 0.94, "solid=temp  dash=humidity  dot=flow  red=laser",
+        for payload, ax in self.ax_opc_heat.items():
+            ax.text(0.995, 0.94, "{} raw bin counts".format(payload.upper()),
+                    transform=ax.transAxes, fontsize=7.5, color=pal["text_muted"],
+                    ha="right", va="top", fontfamily="monospace")
+        self.ax_opc_scalars.text(0.995, 0.94, "solid=temp  dash=humidity  dot=flow  dashdot=laser",
                                   transform=self.ax_opc_scalars.transAxes,
                                   fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
 
@@ -432,6 +449,10 @@ class QuickView:
                     "rh_sensor_humidity", "flow", "rssi",
                     "pump_front_state", "pump_back_state", "valve_state"):
             val = d.get(key)
+            if isinstance(val, float) and abs(val - FILL_FLOAT) < 1:
+                val = None
+            if isinstance(val, int) and val in (FILL_INT, FILL_UINT):
+                val = None
             self.series[key][payload].append(val if val is not None else float("nan"))
 
         qnh_hpa = d.get("_qnh_hpa")
@@ -453,24 +474,24 @@ class QuickView:
             self._last_flow_time[payload] = dt_local
         self.series["volume_l"][payload].append(self._volume_l[payload])
 
-        # OPC-N3: kenttarova only. Raw bin counts arrive as uint16 with a fill
-        # value (FILL_UINT = 4294967295) when the sensor was unavailable.
-        if payload == "kenttarova":
+        if payload in OPC_PAYLOADS:
             bin_vals = []
             any_bin = False
             for i in range(24):
                 v = d.get("opc_bin_{}".format(i))
-                if v is None or v == FILL_UINT:
+                if v is None or v in (FILL_UINT, FILL_USHORT):
                     bin_vals.append(float("nan"))
                 else:
                     bin_vals.append(float(v))
                     any_bin = True
             if any_bin:
-                self._opc_bin_history.append(bin_vals)
-                self._opc_time_history.append(dt_local)
+                self._opc_bin_history[payload].append(bin_vals)
+                self._opc_time_history[payload].append(dt_local)
 
             for key in ("opc_temperature", "opc_humidity", "opc_sample_flow"):
                 val = d.get(key)
+                if isinstance(val, float) and abs(val - FILL_FLOAT) < 1:
+                    val = None
                 self.series[key][payload].append(val if val is not None else float("nan"))
             laser = d.get("opc_laser_status")
             self.series["opc_laser_status"][payload].append(
@@ -494,15 +515,15 @@ class QuickView:
 
     OPC_HEATMAP_MAX_COLS = 400  # cap redraw cost: downsample if more points accumulate
 
-    def _redraw_opc_heatmap(self):
+    def _redraw_opc_heatmap(self, payload):
         import numpy as np
 
-        n = len(self._opc_time_history)
+        n = len(self._opc_time_history[payload])
         if n < 2:
             return
 
-        times = list(self._opc_time_history)
-        bins = list(self._opc_bin_history)
+        times = list(self._opc_time_history[payload])
+        bins = list(self._opc_bin_history[payload])
 
         if n > self.OPC_HEATMAP_MAX_COLS:
             step = n // self.OPC_HEATMAP_MAX_COLS
@@ -513,8 +534,8 @@ class QuickView:
         data = np.array(bins, dtype=float).T  # shape (24, n)
         xnums = mdates.date2num(times)
 
-        if self._opc_mesh is not None:
-            self._opc_mesh.remove()
+        if self._opc_mesh[payload] is not None:
+            self._opc_mesh[payload].remove()
 
         # pcolormesh needs edges, not centers: pad x by one dt and y by 0..24
         if n >= 2:
@@ -524,20 +545,25 @@ class QuickView:
         x_edges = np.concatenate([xnums, [xnums[-1] + dt_edge]])
         y_edges = np.arange(25)
 
-        self._opc_mesh = self.ax_opc_heat.pcolormesh(
+        ax = self.ax_opc_heat[payload]
+        self._opc_mesh[payload] = ax.pcolormesh(
             x_edges, y_edges, data, cmap="viridis", shading="flat"
         )
 
-        if self._opc_colorbar is None:
-            self._opc_colorbar = self.fig.colorbar(
-                self._opc_mesh, ax=self.ax_opc_heat, pad=0.01, fraction=0.02
+        if self._opc_colorbar[payload] is None:
+            self._opc_colorbar[payload] = self.fig.colorbar(
+                self._opc_mesh[payload], ax=ax, pad=0.01, fraction=0.02
             )
-            self._opc_colorbar.set_label("raw count", fontsize=8, color=self.palette["text_muted"])
-            self._opc_colorbar.ax.tick_params(labelsize=7.5, colors=self.palette["text_muted"])
+            self._opc_colorbar[payload].set_label(
+                "raw count", fontsize=8, color=self.palette["text_muted"]
+            )
+            self._opc_colorbar[payload].ax.tick_params(
+                labelsize=7.5, colors=self.palette["text_muted"]
+            )
         else:
-            self._opc_colorbar.update_normal(self._opc_mesh)
+            self._opc_colorbar[payload].update_normal(self._opc_mesh[payload])
 
-        self.ax_opc_heat.set_ylim(0, 24)
+        ax.set_ylim(0, 24)
 
     def update_plot(self, _frame):
         qnh_state = self.qnh_provider.snapshot()
@@ -562,14 +588,19 @@ class QuickView:
                         "rh_sensor_humidity", "flow", "volume_l"):
                 self._set_line_data(key, payload)
 
-        opc_payload = "kenttarova"
-        opc_xs = mdates.date2num(list(self.timestamps[opc_payload])) if self.timestamps[opc_payload] else []
-        self.opc_temp_line.set_data(opc_xs, list(self.series["opc_temperature"][opc_payload]))
-        self.opc_hum_line.set_data(opc_xs, list(self.series["opc_humidity"][opc_payload]))
-        self.opc_flow_line.set_data(opc_xs, list(self.series["opc_sample_flow"][opc_payload]))
-        self.opc_laser_line.set_data(opc_xs, list(self.series["opc_laser_status"][opc_payload]))
-
-        self._redraw_opc_heatmap()
+        for payload in OPC_PAYLOADS:
+            opc_xs = (
+                mdates.date2num(list(self.timestamps[payload]))
+                if self.timestamps[payload] else []
+            )
+            for key in (
+                "opc_temperature", "opc_humidity",
+                "opc_sample_flow", "opc_laser_status",
+            ):
+                self.opc_lines[key][payload].set_data(
+                    opc_xs, list(self.series[key][payload])
+                )
+            self._redraw_opc_heatmap(payload)
 
         if all_xnums:
             xmin, xmax = min(all_xnums), max(all_xnums)
@@ -577,7 +608,7 @@ class QuickView:
             self.ax_batt.set_xlim(xmin - span * 0.02, xmax + span * 0.05)
 
         for ax in self.time_axes + [self.ax_vol, self.ax_opc_laser]:
-            if ax is self.ax_opc_heat:
+            if ax in self.ax_opc_heat.values():
                 continue
             ax.relim()
             ax.autoscale_view(scalex=False)
@@ -585,9 +616,11 @@ class QuickView:
         artists = []
         for m in self.lines.values():
             artists.extend(m.values())
-        artists.extend([self.opc_temp_line, self.opc_hum_line, self.opc_flow_line, self.opc_laser_line])
-        if self._opc_mesh is not None:
-            artists.append(self._opc_mesh)
+        for lines in self.opc_lines.values():
+            artists.extend(lines.values())
+        artists.extend(
+            mesh for mesh in self._opc_mesh.values() if mesh is not None
+        )
         return artists
 
     def run(self, interval_ms=1000):
