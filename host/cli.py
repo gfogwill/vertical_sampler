@@ -10,6 +10,11 @@ import struct
 
 import serial
 
+if __package__:
+    from .fmi_qnh import DEFAULT_QNH_HPA, QnhProvider
+else:
+    from fmi_qnh import DEFAULT_QNH_HPA, QnhProvider
+
 
 class Payload(Enum):
     MATOROVA = "matorova"
@@ -264,7 +269,7 @@ def _opc_bin_total(d):
     return total if found else None
 
 
-def _enrich_data(data, payload, qnh_hpa=1013.25):
+def _enrich_data(data, payload, qnh_hpa=DEFAULT_QNH_HPA):
     """Apply pressure offset, compute pressure altitude and OPC bin total in-place."""
     p = data.get("pressure_sensor_pressure")
     if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
@@ -336,23 +341,28 @@ _CMD_QUIT = "quit"
 
 
 class PollWorker(threading.Thread):
-    def __init__(self, payloads, qnh, log_file):
+    def __init__(self, payloads, qnh_provider, log_file):
         super().__init__(daemon=True)
         self.payloads = payloads
-        self.qnh = qnh
+        self.qnh_provider = qnh_provider
         self.log_file = log_file
         self.cmd_q = queue.Queue()
         self.result_q = queue.Queue()
 
     def _enrich(self, d, payload):
+        qnh_state = self.qnh_provider.snapshot()
         p = d.get("pressure_sensor_pressure")
         if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
             p_corrected = _apply_pressure_offset(payload, p)
             d["pressure_sensor_pressure_corrected"] = p_corrected
-            d["_pressure_altitude"] = _pressure_altitude(p_corrected, self.qnh)
+            d["_pressure_altitude"] = _pressure_altitude(p_corrected, qnh_state.qnh_hpa)
         else:
             d["pressure_sensor_pressure_corrected"] = None
             d["_pressure_altitude"] = None
+        d["_qnh_hpa"] = qnh_state.qnh_hpa
+        d["_qnh_source"] = qnh_state.source
+        if qnh_state.observation_time is not None:
+            d["_qnh_observation_time"] = qnh_state.observation_time.isoformat()
         d["_opc_bin_total"] = _opc_bin_total(d)
         return d
 
@@ -511,10 +521,13 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows):
             row += 1
 
 
-def _run_monitor(payloads, qnh, log_file):
+def _run_monitor(payloads, qnh, log_file, auto_qnh=True):
     import curses
 
-    worker = PollWorker(payloads, qnh, log_file)
+    fallback_qnh = qnh if qnh is not None else DEFAULT_QNH_HPA
+    qnh_provider = QnhProvider(fallback_qnh=fallback_qnh, enabled=auto_qnh)
+    qnh_provider.start()
+    worker = PollWorker(payloads, qnh_provider, log_file)
     worker.start()
 
     state = {p: {} for p in payloads}
@@ -561,6 +574,7 @@ def _run_monitor(payloads, qnh, log_file):
         stdscr.timeout(100)
 
         add_event("Monitor started. Listening for heartbeats...")
+        last_qnh_signature = None
 
         while True:
             try:
@@ -595,7 +609,28 @@ def _run_monitor(payloads, qnh, log_file):
             stdscr.erase()
             rows, cols = stdscr.getmaxyx()
             ts_now = datetime.datetime.now(tz=_UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-            header = " Vertical Sampler Monitor {} QNH={} hPa ".format(ts_now, qnh)
+            qnh_state = qnh_provider.snapshot()
+            qnh_signature = (
+                qnh_state.source,
+                round(qnh_state.qnh_hpa, 2),
+                qnh_state.observation_time,
+                qnh_state.error,
+            )
+            if qnh_signature != last_qnh_signature:
+                if qnh_state.error:
+                    add_event("QNH {} {:.2f} hPa: {}".format(
+                        qnh_state.source.upper(), qnh_state.qnh_hpa, qnh_state.error
+                    ))
+                else:
+                    add_event("QNH updated from {}: {:.2f} hPa".format(
+                        qnh_state.source.upper(), qnh_state.qnh_hpa
+                    ))
+                last_qnh_signature = qnh_signature
+            qnh_source = qnh_state.source.upper()
+            if qnh_state.error:
+                qnh_source += "!"
+            qnh_label = "{} {:.2f} hPa".format(qnh_source, qnh_state.qnh_hpa)
+            header = " Vertical Sampler Monitor {} QNH={} ".format(ts_now, qnh_label)
             _safe_addnstr(stdscr, 0, 0, header.ljust(cols - 1), cols - 1,
                           curses.color_pair(2) | curses.A_REVERSE)
 
@@ -661,7 +696,7 @@ def _run_monitor(payloads, qnh, log_file):
     except Exception as exc:
         worker.cmd_q.put(_CMD_QUIT)
         print("[monitor] curses error ({}), falling back to plain poll.".format(exc))
-        worker2 = PollWorker(payloads, qnh, log_file)
+        worker2 = PollWorker(payloads, qnh_provider, log_file)
         worker2.start()
         worker2.cmd_q.put(_CMD_POLL_ALL)
         received = set()
@@ -679,6 +714,7 @@ def _run_monitor(payloads, qnh, log_file):
         for p in payloads:
             if state2[p]:
                 pretty_print(state2[p], payload_id=str(p))
+    qnh_provider.stop()
 
 
 def parse_args():
@@ -700,7 +736,17 @@ def parse_args():
         choices=list(Payload), default=_PAYLOADS_ALL,
         metavar="PAYLOAD",
     )
-    mon.add_argument("--qnh", type=float, default=1013.25)
+    mon.add_argument(
+        "--qnh",
+        type=float,
+        default=None,
+        help="Manual QNH fallback (hPa); FMI Kittilä Matorova is used by default",
+    )
+    mon.add_argument(
+        "--no-auto-qnh",
+        action="store_true",
+        help="Disable automatic FMI QNH updates",
+    )
     mon.add_argument("--log-file", dest="log_file", default=None, metavar="FILE")
 
     return parser.parse_args()
@@ -713,6 +759,7 @@ if __name__ == "__main__":
             payloads=args.payloads,
             qnh=args.qnh,
             log_file=args.log_file,
+            auto_qnh=not args.no_auto_qnh,
         )
     else:
         relay_cmd(args)

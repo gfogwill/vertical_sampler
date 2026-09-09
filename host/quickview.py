@@ -32,6 +32,11 @@ import matplotlib.dates as mdates
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 
+if __package__:
+    from .fmi_qnh import DEFAULT_QNH_HPA, QnhProvider, is_valid_qnh
+else:
+    from fmi_qnh import DEFAULT_QNH_HPA, QnhProvider, is_valid_qnh
+
 # ---------------------------------------------------------------------------
 # General configuration
 # ---------------------------------------------------------------------------
@@ -63,8 +68,14 @@ def parse_args():
                    help="Max points per payload kept in memory (0 = unlimited, full history)")
     p.add_argument("--interval-ms", type=int, default=1000,
                    help="Refresh interval (ms)")
-    p.add_argument("--qnh", type=float, default=1013.25,
-                   help="Today's QNH (hPa), used to derive altitude from pressure")
+    p.add_argument(
+        "--qnh",
+        type=float,
+        default=None,
+        help="Manual QNH fallback (hPa); FMI Kittilä Matorova is used by default",
+    )
+    p.add_argument("--no-auto-qnh", action="store_true",
+                   help="Disable automatic FMI QNH updates")
     p.add_argument("--theme", choices=["dark", "light"], default="dark",
                    help="Dashboard visual theme")
     p.add_argument("--stale-after", type=float, default=90.0,
@@ -96,11 +107,17 @@ def baro_altitude_m(pressure_hpa, qnh_hpa):
 
 
 class QuickView:
-    def __init__(self, log_file, max_points, stale_after, theme, qnh):
+    def __init__(self, log_file, max_points, stale_after, theme, qnh, auto_qnh=True):
         self.log_file = log_file
         self.max_points = max_points if max_points > 0 else None
         self.stale_after = stale_after
-        self.qnh = qnh
+        fallback_qnh = qnh if qnh is not None else DEFAULT_QNH_HPA
+        self.qnh_provider = QnhProvider(
+            fallback_qnh=fallback_qnh,
+            enabled=auto_qnh,
+        )
+        self.qnh_provider.start()
+        self.qnh = fallback_qnh
         self.palette = apply_theme(theme)
         self.file_pos = 0
 
@@ -250,8 +267,11 @@ class QuickView:
                            fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
         self.ax_alt.text(0.995, 0.94, "solid=GPS  dash=baro", transform=self.ax_alt.transAxes,
                           fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
-        self.ax_flow.text(0.995, 0.94, f"QNH={self.qnh:.1f}hPa  dash=cum.vol", transform=self.ax_flow.transAxes,
-                           fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
+        self.qnh_label = self.ax_flow.text(
+            0.995, 0.94, f"QNH={self.qnh:.1f}hPa  dash=cum.vol",
+            transform=self.ax_flow.transAxes, fontsize=7.5,
+            color=pal["text_muted"], ha="right", va="top", fontfamily="monospace",
+        )
         self.ax_opc_heat.text(0.995, 0.94, "kenttarova raw bin counts", transform=self.ax_opc_heat.transAxes,
                                fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
         self.ax_opc_scalars.text(0.995, 0.94, "solid=temp  dash=humidity  dot=flow  red=laser",
@@ -414,7 +434,10 @@ class QuickView:
             val = d.get(key)
             self.series[key][payload].append(val if val is not None else float("nan"))
 
-        baro_alt = baro_altitude_m(d.get("pressure_sensor_pressure"), self.qnh)
+        qnh_hpa = d.get("_qnh_hpa")
+        if not is_valid_qnh(qnh_hpa):
+            qnh_hpa = self.qnh_provider.snapshot().qnh_hpa
+        baro_alt = baro_altitude_m(d.get("pressure_sensor_pressure"), qnh_hpa)
         self.series["baro_altitude"][payload].append(baro_alt)
 
         # continuous trapezoidal integration of flow -> volume (L)
@@ -517,6 +540,16 @@ class QuickView:
         self.ax_opc_heat.set_ylim(0, 24)
 
     def update_plot(self, _frame):
+        qnh_state = self.qnh_provider.snapshot()
+        self.qnh = qnh_state.qnh_hpa
+        qnh_source = qnh_state.source.upper()
+        if qnh_state.error:
+            qnh_source += "!"
+        self.qnh_label.set_text(
+            "QNH={:.2f}hPa ({})  dash=cum.vol".format(
+                self.qnh, qnh_source
+            )
+        )
         self.update_from_lines()
 
         all_xnums = []
@@ -563,6 +596,9 @@ class QuickView:
         )
         plt.show()
 
+    def stop(self):
+        self.qnh_provider.stop()
+
 
 def main():
     args = parse_args()
@@ -572,8 +608,12 @@ def main():
         stale_after=args.stale_after,
         theme=args.theme,
         qnh=args.qnh,
+        auto_qnh=not args.no_auto_qnh,
     )
-    qv.run(interval_ms=args.interval_ms)
+    try:
+        qv.run(interval_ms=args.interval_ms)
+    finally:
+        qv.stop()
 
 
 if __name__ == "__main__":

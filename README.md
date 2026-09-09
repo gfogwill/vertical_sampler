@@ -122,6 +122,16 @@ python host/cli.py matorova data
 
 `host/quickview.py` is available for local data inspection and visualization.
 
+The host dashboards automatically use the latest sea-level pressure observation
+from FMI station `Kittilä Matorova` (`fmisid=101985`) as QNH. The value is
+refreshed every 10 minutes through the public
+[FMI WFS API](https://opendata.fmi.fi/wfs). If FMI is unavailable, the last
+fresh FMI value is retained and then the manual/default value of 1013.25 hPa
+is used. Pass `--qnh VALUE` to select a different fallback, or
+`--no-auto-qnh` to disable automatic updates. Logged monitor samples include
+`_qnh_hpa`, `_qnh_source` and `_qnh_observation_time` so derived altitude
+remains traceable.
+
 ## Telemetry Format
 
 Each payload sample is logged as JSONL when an SD card is available and sent over LoRa as a packed binary packet defined in `firmware/common/pack.py`.
