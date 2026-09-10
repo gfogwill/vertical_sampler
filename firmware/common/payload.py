@@ -66,8 +66,10 @@ def _update_opc_histogram(data,opc,logger,status_led):
     except Exception as e: logger.warning("OPC histogram read failed: {}".format(e))
 
 def _update_rssi(data,lora,logger):
-    try: data["rssi"]=int(lora.rssi()); logger.info("LoRa RX RSSI: {} dBm".format(data["rssi"]))
-    except Exception as e: logger.warning("LoRa RSSI read failed: {}".format(e))
+    try:
+        data["uplink_rssi"]=int(lora.rssi())
+        logger.info("LoRa uplink RSSI: {} dBm".format(data["uplink_rssi"]))
+    except Exception as e: logger.warning("LoRa uplink RSSI read failed: {}".format(e))
 
 def _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,status_led):
     try:
@@ -122,7 +124,7 @@ def main_loop(lora,payload_id,logger,spi=None,shared_spi=None,pump_locations=("f
         except Exception as e: opc=None; logger.warning("OPC-N3 unavailable: {}".format(e))
     elif has_opc:
         logger.warning("OPC-N3 disabled: no shared SPI bus provided")
-    data=_snapshot(payload_id,pump,valve,power,logger); data["flow"]=None; data["rssi"]=None
+    data=_snapshot(payload_id,pump,valve,power,logger); data["flow"]=None; data["uplink_rssi"]=None
     for i in range(24): data["opc_bin_{}".format(i)]=None
     data["opc_temperature"]=None; data["opc_humidity"]=None; data["opc_sample_flow"]=None; data["opc_laser_status"]=None
     if gps is not None: data.update(gps.fields())

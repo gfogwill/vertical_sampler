@@ -68,6 +68,15 @@ def _print_json(obj):
     print(json.dumps(obj, separators=(",", ":")))
 
 
+def _add_downlink_rssi(data):
+    try:
+        data["downlink_rssi"] = int(lora.rssi())
+    except Exception as error:
+        print("WARN downlink RSSI read failed: {}".format(error))
+        data["downlink_rssi"] = None
+    return data
+
+
 def _command_ack_matches_state(cmd, data):
     if not cmd:
         return True
@@ -126,6 +135,7 @@ def _process_command(cmd_str):
         if d is None:
             # parse error already printed above — keep waiting
             continue
+        _add_downlink_rssi(d)
 
         msg_type = d.get("msg_type", "")
         if d.get("payload_id") != payload_id:
@@ -181,6 +191,7 @@ while True:
             led.blink(ntimes=2, bsleep=0.1, tsleep=0.1, esleep=0.1)
             d = _parse_packet(msg)
             if d is not None:
+                _add_downlink_rssi(d)
                 if not d.get("msg_type"):
                     d["msg_type"] = pack.MSG_TELEMETRY
                 _print_json(d)

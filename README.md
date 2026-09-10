@@ -161,7 +161,8 @@ Each payload sample is logged as JSONL when an SD card is available and sent ove
 | `battery_voltage` | float | Calibrated 6S battery voltage |
 | `cpu_temperature` | float | Pico internal temperature, °C |
 | `flow` | float | Standard L/min |
-| `rssi` | int | Last received LoRa RSSI |
+| `uplink_rssi` | int/null | Last ground-to-payload command RSSI measured by the payload, dBm |
+| `downlink_rssi` | int/null | Current payload-to-ground packet RSSI measured by the ground station, dBm |
 | `pump_front_state` | int | 0 or 1 |
 | `pump_back_state` | int/null | 0 or 1; unavailable on Carla |
 | `valve_state` | int/null | 0 or 1; unavailable on Carla |

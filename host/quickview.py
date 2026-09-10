@@ -446,9 +446,11 @@ class QuickView:
 
         for key in ("battery_voltage", "cpu_temperature", "pressure_sensor_temperature",
                     "rh_sensor_temperature", "pressure_sensor_pressure", "gps_altitude",
-                    "rh_sensor_humidity", "flow", "rssi",
+                    "rh_sensor_humidity", "flow", "uplink_rssi", "downlink_rssi",
                     "pump_front_state", "pump_back_state", "valve_state"):
             val = d.get(key)
+            if key == "uplink_rssi" and val is None:
+                val = d.get("rssi")
             if isinstance(val, float) and abs(val - FILL_FLOAT) < 1:
                 val = None
             if isinstance(val, int) and val in (FILL_INT, FILL_UINT):

@@ -6,6 +6,8 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 import json
+import io
+from contextlib import redirect_stdout
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -111,6 +113,41 @@ class PayloadCapabilityTests(unittest.TestCase):
         self.assertEqual(decoded["pump_back_state"], pack.INT_FILLVAL)
         self.assertEqual(decoded["valve_state"], pack.INT_FILLVAL)
         self.assertEqual(decoded["opc_bin_0"], pack.UNSIGNED_SHORT_FILLVAL)
+
+    def test_radio_packet_carries_payload_measured_uplink_rssi(self):
+        pack = load_pack_module()
+        packet = pack.dict2bytes({
+            "payload_id": "alma",
+            "uplink_rssi": -87,
+        })
+        decoded = pack.bytes2dict(packet)
+
+        self.assertEqual(decoded["uplink_rssi"], -87)
+        self.assertNotIn("downlink_rssi", decoded)
+
+    def test_old_rssi_field_is_treated_as_uplink(self):
+        data = {"rssi": -91}
+
+        cli._normalize_signal_fields(data)
+
+        self.assertEqual(data["uplink_rssi"], -91)
+
+    def test_system_values_are_printed_before_opc_values(self):
+        data = {
+            "battery_voltage": 23.4,
+            "uplink_rssi": -90,
+            "downlink_rssi": -82,
+            "opc_temperature": 20.0,
+        }
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            cli.pretty_print(data, payload_id="alma")
+
+        rendered = output.getvalue()
+        self.assertLess(rendered.index("System"), rendered.index("OPC"))
+        self.assertIn("RSSI ground->payload", rendered)
+        self.assertIn("RSSI payload->ground", rendered)
 
     def test_front_only_pump_does_not_claim_back_output(self):
         actuators, created = load_actuators_module()

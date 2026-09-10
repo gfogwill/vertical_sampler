@@ -74,11 +74,12 @@ FIELDS = [
     ("opc_sample_flow",             "Sample flow",       "mL/s",  "OPC"),
     ("opc_laser_status",            "Laser status",      "",      "OPC"),
     ("battery_voltage",             "Battery",           "V",     "System"),
+    ("uplink_rssi",                 "RSSI ground->payload", "dBm", "System"),
+    ("downlink_rssi",               "RSSI payload->ground", "dBm", "System"),
     ("cpu_temperature",             "CPU temp",          "\u00b0C",   "System"),
-    ("rssi",                        "RSSI",              "dBm",   "System"),
 ]
 
-GROUP_ORDER = ["GPS", "Atmosphere", "Sampler", "OPC", "System"]
+GROUP_ORDER = ["System", "GPS", "Atmosphere", "Sampler", "OPC"]
 
 # Control key map: key -> (payload, actuator, location)
 _CTRL_KEYS = {
@@ -167,7 +168,15 @@ def _field_supported(payload_id, key):
     return True
 
 
+def _normalize_signal_fields(data):
+    """Map telemetry from older payload firmware to the explicit uplink name."""
+    if "uplink_rssi" not in data and "rssi" in data:
+        data["uplink_rssi"] = data["rssi"]
+    return data
+
+
 def pretty_print(data, payload_id=""):
+    _normalize_signal_fields(data)
     COL_LABEL = 26
     COL_VALUE = 10
     COL_UNIT = 7
@@ -294,6 +303,7 @@ def _read_cmd_response(ser, timeout_s, accept_telemetry=False, expected_payload=
             if text.startswith("{"):
                 try:
                     d = json.loads(text)
+                    _normalize_signal_fields(d)
                     if d.get("error"):
                         stage = d.get("stage", "ground_bridge")
                         d["_error"] = "{}: {}".format(stage, d["error"])
@@ -414,6 +424,7 @@ class PollWorker(threading.Thread):
         self.result_q = queue.Queue()
 
     def _enrich(self, d, payload):
+        _normalize_signal_fields(d)
         qnh_state = self.qnh_provider.snapshot()
         p = d.get("pressure_sensor_pressure")
         if p is not None and isinstance(p, (int, float)) and abs(p - FILL_FLOAT) > 1:
@@ -479,6 +490,7 @@ class PollWorker(threading.Thread):
             if text.startswith("{"):
                 try:
                     d = json.loads(text)
+                    _normalize_signal_fields(d)
                     msg_type = d.get("msg_type", _MSG_TELEMETRY)
                     if msg_type not in (_MSG_TELEMETRY, ""):
                         return
