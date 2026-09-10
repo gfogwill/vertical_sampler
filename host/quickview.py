@@ -24,6 +24,7 @@ Panels (top to bottom, shared local-time X axis):
 
 import argparse
 import json
+import math
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 
@@ -451,6 +452,8 @@ class QuickView:
             val = d.get(key)
             if key == "uplink_rssi" and val is None:
                 val = d.get("rssi")
+            if isinstance(val, float) and not math.isfinite(val):
+                val = None
             if isinstance(val, float) and abs(val - FILL_FLOAT) < 1:
                 val = None
             if isinstance(val, int) and val in (FILL_INT, FILL_UINT):

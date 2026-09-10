@@ -24,6 +24,11 @@ class LoRa:
     def receive(self, timeout=1):
         self._before_lora()
         return self.rfm9x.receive(timeout=timeout)
+    def receive_with_rssi(self, timeout=1):
+        msg = self.receive(timeout=timeout)
+        if msg is None:
+            return None, None
+        return msg, self.rfm9x.last_rssi
     def rssi(self): return self.rfm9x.last_rssi
     def set_destination(self, destination): self.rfm9x.destination = destination
     def reset_radio(self):

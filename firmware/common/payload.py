@@ -65,9 +65,10 @@ def _update_opc_histogram(data,opc,logger,status_led):
         status_led.sensors_updated()
     except Exception as e: logger.warning("OPC histogram read failed: {}".format(e))
 
-def _update_rssi(data,lora,logger):
+def _update_rssi(data,rssi,logger):
     try:
-        data["uplink_rssi"]=int(lora.rssi())
+        if rssi is None: raise ValueError("RSSI unavailable")
+        data["uplink_rssi"]=int(rssi)
         logger.info("LoRa uplink RSSI: {} dBm".format(data["uplink_rssi"]))
     except Exception as e: logger.warning("LoRa uplink RSSI read failed: {}".format(e))
 
@@ -141,8 +142,8 @@ def main_loop(lora,payload_id,logger,spi=None,shared_spi=None,pump_locations=("f
             if gps is not None:
                 sync_event=gps.update()
                 if sync_event is not None: logger.data(sync_event)
-            msg=lora.receive(timeout=0.2)
-            if msg is not None: status_led.rx(); _update_rssi(data,lora,logger); _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,status_led)
+            msg,uplink_rssi=lora.receive_with_rssi(timeout=0.2)
+            if msg is not None: status_led.rx(); _update_rssi(data,uplink_rssi,logger); _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,status_led)
             now=time.monotonic(); sampled=False
             if now>=next_safety: safety.update(power,pump,valve); next_safety=now+1.0
             if now>=next_sht85: _update_sht85(data,sht85,logger,status_led); next_sht85=now+SHT85_INTERVAL_S; sampled=True

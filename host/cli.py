@@ -124,8 +124,9 @@ def _pressure_altitude(pressure_hpa, qnh_hpa):
 def _fmt_value(key, val):
     if val is None:
         return "N/A", True
-    if isinstance(val, float) and abs(val - FILL_FLOAT) < 1:
-        return "N/A", True
+    if isinstance(val, float):
+        if not math.isfinite(val) or abs(val - FILL_FLOAT) < 1:
+            return "N/A", True
     if isinstance(val, int) and val in (FILL_INT, FILL_UINT):
         return "N/A", True
     if key.startswith("opc_bin_") and val == FILL_USHORT:
@@ -172,6 +173,10 @@ def _normalize_signal_fields(data):
     """Map telemetry from older payload firmware to the explicit uplink name."""
     if "uplink_rssi" not in data and "rssi" in data:
         data["uplink_rssi"] = data["rssi"]
+    for key in ("uplink_rssi", "downlink_rssi"):
+        value = data.get(key)
+        if isinstance(value, float) and not math.isfinite(value):
+            data[key] = None
     return data
 
 

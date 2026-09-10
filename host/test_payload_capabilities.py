@@ -132,6 +132,18 @@ class PayloadCapabilityTests(unittest.TestCase):
 
         self.assertEqual(data["uplink_rssi"], -91)
 
+    def test_non_finite_rssi_is_treated_as_unavailable(self):
+        data = {
+            "uplink_rssi": float("nan"),
+            "downlink_rssi": float("inf"),
+        }
+
+        cli._normalize_signal_fields(data)
+
+        self.assertIsNone(data["uplink_rssi"])
+        self.assertIsNone(data["downlink_rssi"])
+        self.assertEqual(cli._fmt_value("downlink_rssi", float("nan")), ("N/A", True))
+
     def test_system_values_are_printed_before_opc_values(self):
         data = {
             "battery_voltage": 23.4,

@@ -36,7 +36,7 @@ class UnexpectedCommand(Exception):
 def _drain_lora(timeout=0.2, max_reads=8):
     drained = 0
     for _ in range(max_reads):
-        msg = lora.receive(timeout=timeout)
+        msg, _rssi = lora.receive_with_rssi(timeout=timeout)
         if msg is None:
             break
         drained += 1
@@ -68,9 +68,11 @@ def _print_json(obj):
     print(json.dumps(obj, separators=(",", ":")))
 
 
-def _add_downlink_rssi(data):
+def _add_downlink_rssi(data, rssi):
     try:
-        data["downlink_rssi"] = int(lora.rssi())
+        if rssi is None:
+            raise ValueError("RSSI unavailable")
+        data["downlink_rssi"] = int(rssi)
     except Exception as error:
         print("WARN downlink RSSI read failed: {}".format(error))
         data["downlink_rssi"] = None
@@ -127,7 +129,7 @@ def _process_command(cmd_str):
     ack = None
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
-        msg = lora.receive(timeout=1.5)
+        msg, downlink_rssi = lora.receive_with_rssi(timeout=1.5)
         if msg is None:
             continue
 
@@ -135,7 +137,7 @@ def _process_command(cmd_str):
         if d is None:
             # parse error already printed above — keep waiting
             continue
-        _add_downlink_rssi(d)
+        _add_downlink_rssi(d, downlink_rssi)
 
         msg_type = d.get("msg_type", "")
         if d.get("payload_id") != payload_id:
@@ -186,12 +188,12 @@ while True:
             _print_json({"error": err})
     else:
         # No serial command waiting — listen passively for heartbeats.
-        msg = lora.receive(timeout=1)
+        msg, downlink_rssi = lora.receive_with_rssi(timeout=1)
         if msg is not None and isinstance(msg, (bytes, bytearray)):
             led.blink(ntimes=2, bsleep=0.1, tsleep=0.1, esleep=0.1)
             d = _parse_packet(msg)
             if d is not None:
-                _add_downlink_rssi(d)
+                _add_downlink_rssi(d, downlink_rssi)
                 if not d.get("msg_type"):
                     d["msg_type"] = pack.MSG_TELEMETRY
                 _print_json(d)
