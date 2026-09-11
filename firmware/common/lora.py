@@ -48,6 +48,10 @@ class LoRa:
         self._before_lora()
         return self.rfm9x.receive(timeout=timeout)
 
+    def receive_with_rssi(self, timeout=1):
+        msg = self.receive(timeout=timeout)
+        return msg, self.rssi()
+
     def rssi(self):
         return self.rfm9x.last_rssi
 
