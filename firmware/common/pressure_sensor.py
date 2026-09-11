@@ -4,11 +4,9 @@ import time
 class PressureSensor:
     ADDRESS = 0x5D
     CTRL_REG1 = 0x20
+    STATUS_REG = 0x27
     PRESS_OUT_XL = 0x28
-    PRESS_OUT_L = 0x29
-    PRESS_OUT_H = 0x2A
     TEMP_L = 0x2B
-    TEMP_H = 0x2C
 
     def __init__(self, logger, i2c_bus):
         self._logger = logger
@@ -16,7 +14,8 @@ class PressureSensor:
         while not self._sensor.try_lock():
             pass
         try:
-            self._sensor.writeto(self.ADDRESS, bytes((self.CTRL_REG1, 0xE0)))
+            # PD=1 (activo), ODR=001 (1 Hz), BDU=1 (lectura atomica de la muestra)
+            self._sensor.writeto(self.ADDRESS, bytes((self.CTRL_REG1, 0x94)))
         finally:
             self._sensor.unlock()
         time.sleep(0.1)
@@ -33,17 +32,39 @@ class PressureSensor:
             self._sensor.unlock()
         return value[0]
 
+    def _read_block(self, start_register, length):
+        data = bytearray(length)
+        while not self._sensor.try_lock():
+            pass
+        try:
+            # bit 7 en 1 = auto-incremento de direccion (lectura atomica multi-byte)
+            self._sensor.writeto(self.ADDRESS, bytes((start_register | 0x80,)))
+            self._sensor.readfrom_into(self.ADDRESS, data)
+        finally:
+            self._sensor.unlock()
+        return data
+
+    def _data_ready(self):
+        status = self._read_register(self.STATUS_REG)
+        p_da = bool(status & 0x02)
+        t_da = bool(status & 0x01)
+        return p_da, t_da
+
     def pressure(self):
-        pressure_xl = self._read_register(self.PRESS_OUT_XL)
-        pressure_l = self._read_register(self.PRESS_OUT_L)
-        pressure_h = self._read_register(self.PRESS_OUT_H)
-        raw = (pressure_h << 16) | (pressure_l << 8) | pressure_xl
+        p_bytes = self._read_block(self.PRESS_OUT_XL, 3)
+        raw = (p_bytes[2] << 16) | (p_bytes[1] << 8) | p_bytes[0]
         return raw / 4096.0
 
     def temperature(self):
-        temp_l = self._read_register(self.TEMP_L)
-        temp_h = self._read_register(self.TEMP_H)
-        raw = (temp_h << 8) | temp_l
+        t_bytes = self._read_block(self.TEMP_L, 2)
+        raw = (t_bytes[1] << 8) | t_bytes[0]
         if raw & 0x8000:
             raw -= 1 << 16
         return 42.5 + raw / 480.0
+
+    def read(self):
+        """Lee presion y temperatura juntas, solo si hay muestra nueva disponible."""
+        p_da, t_da = self._data_ready()
+        if not (p_da and t_da):
+            return None
+        return self.pressure(), self.temperature()
