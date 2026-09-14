@@ -17,8 +17,8 @@ Panels (top to bottom, shared local-time X axis):
 3. Altitude (m) -> GPS (solid) vs pressure-derived via QNH (dashed)
 4. Relative humidity (%)
 5. Flow (L/min, left axis) + cumulative sampled volume (L, right axis)
-6. Alma OPC-N3 size-distribution heatmap: time x bin (0-23), raw counts
-7. Beni OPC-N3 size-distribution heatmap: time x bin (0-23), raw counts
+6. Alma OPC-N3 size-distribution heatmap: time x diameter, log-scaled counts
+7. Beni OPC-N3 size-distribution heatmap: time x diameter, log-scaled counts
 8. Alma and Beni OPC-N3 scalars: temperature / humidity / sample flow + laser status
 """
 
@@ -32,6 +32,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.dates as mdates
 import matplotlib.gridspec as gridspec
+from matplotlib.colors import LogNorm
 from matplotlib.lines import Line2D
 
 if __package__:
@@ -64,6 +65,17 @@ FILL_UINT = 4294967295
 FILL_USHORT = 65535
 FILL_INT = -999999
 FILL_FLOAT = -1e9
+
+# Default OPC-N3 histogram boundaries.  The instrument reports 24 bins, but
+# the current telemetry contains counts only, not the per-device configuration.
+# These are the standard OPC-N3 boundaries and are used for the QuickView
+# diameter axis and logarithmic bin-width normalization.
+OPC_N3_BIN_EDGES_UM = (
+    0.35, 0.46, 0.66, 1.00, 1.30, 1.70, 2.30, 3.00,
+    4.00, 5.00, 6.50, 8.00, 10.0, 12.0, 14.0, 16.0,
+    18.0, 20.0, 22.0, 25.0, 28.0, 31.0, 34.0, 37.0, 40.0,
+)
+OPC_N3_DIAMETER_TICKS_UM = (0.35, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0)
 
 
 def parse_args():
@@ -188,7 +200,8 @@ class QuickView:
             for spine in ax.spines.values():
                 spine.set_color(pal["grid"])
 
-        # OPC-N3 heatmaps: 24 size bins x time, one for each airborne payload.
+        # OPC-N3 heatmaps: 24 logarithmic diameter bins x time, one for each
+        # airborne payload.
         # pcolormesh needs a full redraw each frame (no incremental set_data),
         # so we keep it cheap by capping resolution via OPC_HEATMAP_MAX_COLS.
         self._opc_bin_history = {
@@ -264,8 +277,8 @@ class QuickView:
             (self.ax_alt, "ALTITUDE\n(m)"),
             (self.ax_hum, "HUMIDITY\n(%)"),
             (self.ax_flow, "FLOW\n(L/min)"),
-            (self.ax_opc_heat["alma"], "ALMA OPC\nBIN 0-23"),
-            (self.ax_opc_heat["beni"], "BENI OPC\nBIN 0-23"),
+            (self.ax_opc_heat["alma"], "ALMA OPC\nDIAMETER\n(µm)"),
+            (self.ax_opc_heat["beni"], "BENI OPC\nDIAMETER\n(µm)"),
             (self.ax_opc_scalars, "OPC\n(C, %RH)"),
         ]
         for ax, label in ylabels:
@@ -289,7 +302,13 @@ class QuickView:
             color=pal["text_muted"], ha="right", va="top", fontfamily="monospace",
         )
         for payload, ax in self.ax_opc_heat.items():
-            ax.text(0.995, 0.94, "{} raw bin counts".format(payload.upper()),
+            ax.set_yscale("log")
+            ax.set_ylim(OPC_N3_BIN_EDGES_UM[0], OPC_N3_BIN_EDGES_UM[-1])
+            ax.set_yticks(OPC_N3_DIAMETER_TICKS_UM)
+            ax.set_yticklabels(
+                [("{:.2g}".format(value)) for value in OPC_N3_DIAMETER_TICKS_UM]
+            )
+            ax.text(0.995, 0.94, "{} log dN/dlog10(Dp)".format(payload.upper()),
                     transform=ax.transAxes, fontsize=7.5, color=pal["text_muted"],
                     ha="right", va="top", fontfamily="monospace")
         self.ax_opc_scalars.text(0.995, 0.94, "solid=temp  dash=humidity  dot=flow  dashdot=laser",
@@ -537,22 +556,37 @@ class QuickView:
             n = len(times)
 
         data = np.array(bins, dtype=float).T  # shape (24, n)
+
+        # Convert counts per bin to counts per logarithmic diameter interval.
+        # This prevents the wider upper-size bins from appearing more intense
+        # solely because they cover a larger diameter range.
+        log_bin_widths = np.diff(np.log10(np.asarray(OPC_N3_BIN_EDGES_UM)))
+        data = data / log_bin_widths[:, None]
+        data = np.ma.masked_where(~np.isfinite(data) | (data <= 0), data)
         xnums = mdates.date2num(times)
 
         if self._opc_mesh[payload] is not None:
             self._opc_mesh[payload].remove()
 
-        # pcolormesh needs edges, not centers: pad x by one dt and y by 0..24
+        # pcolormesh needs edges, not centers: pad x by one dt and use the
+        # physical OPC-N3 diameter boundaries on the logarithmic y-axis.
         if n >= 2:
             dt_edge = (xnums[-1] - xnums[0]) / max(n - 1, 1) if n > 1 else 1.0 / 86400.0
         else:
             dt_edge = 1.0 / 86400.0
         x_edges = np.concatenate([xnums, [xnums[-1] + dt_edge]])
-        y_edges = np.arange(25)
+        y_edges = np.asarray(OPC_N3_BIN_EDGES_UM)
+
+        positive = data.compressed()
+        vmax = max(10.0, float(np.max(positive))) if positive.size else 10.0
+        count_norm = LogNorm(vmin=1.0, vmax=vmax)
+        count_cmap = plt.get_cmap("magma").copy()
+        count_cmap.set_bad(color=self.palette["panel"], alpha=0.0)
 
         ax = self.ax_opc_heat[payload]
         self._opc_mesh[payload] = ax.pcolormesh(
-            x_edges, y_edges, data, cmap="viridis", shading="flat"
+            x_edges, y_edges, data, cmap=count_cmap, norm=count_norm,
+            shading="flat", rasterized=True,
         )
 
         if self._opc_colorbar[payload] is None:
@@ -560,7 +594,7 @@ class QuickView:
                 self._opc_mesh[payload], ax=ax, pad=0.01, fraction=0.02
             )
             self._opc_colorbar[payload].set_label(
-                "raw count", fontsize=8, color=self.palette["text_muted"]
+                "log dN/dlog10(Dp)", fontsize=8, color=self.palette["text_muted"]
             )
             self._opc_colorbar[payload].ax.tick_params(
                 labelsize=7.5, colors=self.palette["text_muted"]
@@ -568,7 +602,12 @@ class QuickView:
         else:
             self._opc_colorbar[payload].update_normal(self._opc_mesh[payload])
 
-        ax.set_ylim(0, 24)
+        ax.set_yscale("log")
+        ax.set_ylim(OPC_N3_BIN_EDGES_UM[0], OPC_N3_BIN_EDGES_UM[-1])
+        ax.set_yticks(OPC_N3_DIAMETER_TICKS_UM)
+        ax.set_yticklabels(
+            [("{:.2g}".format(value)) for value in OPC_N3_DIAMETER_TICKS_UM]
+        )
 
     def update_plot(self, _frame):
         qnh_state = self.qnh_provider.snapshot()
