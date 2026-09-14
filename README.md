@@ -128,8 +128,12 @@ python host/cli.py pump carla front on
 ```
 
 `host/quickview.py` is available for local data inspection and visualization.
-It displays separate OPC-N3 histogram heatmaps for Alma and Beni. Carla is
-included in the common sensor plots but has no OPC or electro-valve controls.
+It displays separate Alma and Beni OPC-N3 heatmaps using the standard
+0.35–40 µm diameter bins on a logarithmic diameter axis. Heatmap colors use
+logarithmic normalization and are corrected to counts per logarithmic diameter
+interval (`dN/dlog10(Dp)`); they are not yet normalized by sampled air volume.
+Carla is included in the common sensor plots but has no OPC or electro-valve
+controls.
 
 For daily low-cloud measurement planning at Matorova, install the weather
 dashboard dependencies and launch:
