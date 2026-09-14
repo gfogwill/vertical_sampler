@@ -131,6 +131,37 @@ python host/cli.py pump carla front on
 It displays separate OPC-N3 histogram heatmaps for Alma and Beni. Carla is
 included in the common sensor plots but has no OPC or electro-valve controls.
 
+For daily low-cloud measurement planning at Matorova, install the weather
+dashboard dependencies and launch:
+
+```bash
+python -m pip install -r host/requirements-weather.txt
+python host/weather_dashboard.py
+```
+
+The dashboard refreshes every 10 minutes and combines:
+
+- ECMWF IFS boundary-layer height and surface forecast, retrieved through
+  Open-Meteo.
+- Altitude-resolved cloud fraction from Cloudnet's preferred forecast model
+  for Kenttärova (normally MEPS), with liquid, ice and precipitating
+  hydrometeor contours.
+- Near-real-time cloud-base and cloud-top observations from ACTRIS Cloudnet at
+  Kenttärova, visualized as Cloudnet target classifications for liquid,
+  drizzle/rain, ice, mixed-phase and melting particles.
+- The latest Kenttärova HATPRO microwave-radiometer temperature and relative
+  humidity profile, including potential temperature for visually identifying
+  stable layers and likely boundary-layer tops.
+- The latest available 00 or 12 UTC Sodankylä radiosonde profile from the
+  University of Wyoming archive.
+
+Cloudnet NetCDF files are cached under
+`~/.cache/vertical_sampler/weather`, and are downloaded again only when their
+portal metadata indicates an update. The large HATPRO file is refreshed at
+most once per hour, and cached files older than seven days are removed. The
+plots focus on the lowest 2 km above ground. Use `--refresh-minutes 0` for a static view or
+`--output matorova-weather.png` to generate a PNG without opening a window.
+
 The host dashboards automatically use the latest sea-level pressure observation
 from FMI station `Kittilä Matorova` (`fmisid=101985`) as QNH. The value is
 refreshed every 10 minutes through the public
