@@ -10,7 +10,7 @@ Supported JSON line formats:
 - {"pc_time": "...", "payload": "alma", "data": {...}} (wrapped)
 - {...} with "payload_id" inside (flat, cli.py format)
 
-Panels (top to bottom, shared local-time X axis):
+Panels (top to bottom, shared UTC X axis):
 0. Battery (V) -> with warning/cutoff reference lines
 1. Temperatures (C) -> CPU / pressure sensor / RH, per payload
 2. Pressure (hPa)
@@ -152,6 +152,8 @@ class QuickView:
 
         # time anchor per payload: (gps_time_at_anchor, real_datetime_at_anchor)
         self._anchor = {p: None for p in PAYLOADS}
+        # fallback anchor for logs from payloads without a valid UTC clock
+        self._monotonic_anchor = {p: None for p in PAYLOADS}
 
         self._build_figure()
         self.read_all_existing_lines()
@@ -332,8 +334,12 @@ class QuickView:
         for ax in self.time_axes[:-1]:
             ax.tick_params(labelbottom=False)
 
-        self.date_formatter = mdates.DateFormatter("%H:%M:%S")
+        self.date_formatter = mdates.DateFormatter(
+            "%H:%M:%S",
+            tz=timezone.utc,
+        )
         self.ax_opc_scalars.xaxis.set_major_formatter(self.date_formatter)
+        self.ax_opc_scalars.set_xlabel("UTC time")
         for lbl in self.ax_opc_scalars.get_xticklabels():
             lbl.set_rotation(25)
             lbl.set_ha("right")
@@ -384,69 +390,102 @@ class QuickView:
             return pid, entry
         return None, None
 
+    @staticmethod
+    def _parse_utc_datetime(value):
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            normalized = value.strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(normalized)
+        except (TypeError, ValueError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc)
+        return dt if dt.year >= MIN_VALID_YEAR else None
+
+    @staticmethod
+    def _parse_epoch_datetime(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        try:
+            dt = datetime.fromtimestamp(value, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+        return dt if dt.year >= MIN_VALID_YEAR else None
+
+    @staticmethod
+    def _finite_value(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
     def timestamp_for_entry(self, entry, d, payload):
-        """DEBUG: ignora GPS/RTC y devuelve un timestamp sintético que avanza
-        1 segundo por cada línea leída, así siempre se ve algo en pantalla
-        aunque el payload nunca haya tenido fix de GPS."""
-        if not hasattr(self, "_debug_seq"):
-            self._debug_seq = {}
-        seq = self._debug_seq.get(payload, 0)
-        self._debug_seq[payload] = seq + 1
-        base = getattr(self, "_debug_base", None)
-        if base is None:
-            base = datetime.now().astimezone()
-            self._debug_base = base
-        return base + timedelta(seconds=seq)
-        
-    def timestamp_for_entry_old(self, entry, d, payload):
-        """Return a real local datetime for this sample.
+        """Return the best available sample time as an aware UTC datetime.
 
-        Priority: valid rtc_time -> wrapped pc_time -> anchor + gps_time delta
-        -> bootstrap a new anchor at "now" (degraded mode, e.g. GPS never got
-        a fix during this session) so data is never silently dropped.
+        Device UTC/RTC time is preferred, followed by an explicitly wrapped
+        or host-side epoch timestamp. GPS epoch time and monotonic time are
+        fallbacks for payload logs that do not carry a valid UTC clock.
         """
-        rtc_str = d.get("rtc_time") if isinstance(d, dict) else None
-        gps_time = d.get("gps_time") if isinstance(d, dict) else None
+        data = d if isinstance(d, dict) else {}
+        gps_time = self._finite_value(data.get("gps_time"))
 
-        if rtc_str:
-            try:
-                dt = datetime.fromisoformat(rtc_str)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                if dt.year >= MIN_VALID_YEAR:
-                    dt_local = dt.astimezone()
-                    if payload in PAYLOADS and gps_time is not None:
-                        self._anchor[payload] = (gps_time, dt_local)
-                    return dt_local
-            except Exception:
-                pass
+        device_time = self._parse_utc_datetime(data.get("utc_time"))
+        if device_time is None:
+            device_time = self._parse_utc_datetime(data.get("rtc_time"))
+        if device_time is not None:
+            if payload in PAYLOADS and gps_time is not None:
+                self._anchor[payload] = (gps_time, device_time)
+            return device_time
 
-        pc_time = entry.get("pc_time") if isinstance(entry, dict) else None
-        if pc_time:
-            try:
-                dt = datetime.fromisoformat(pc_time)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone()
-            except Exception:
-                pass
+        wrapped_pc_time = (
+            entry.get("pc_time") if isinstance(entry, dict) else None
+        )
+        pc_time = self._parse_utc_datetime(wrapped_pc_time)
+        if pc_time is None:
+            pc_time = self._parse_utc_datetime(data.get("pc_time"))
+        if pc_time is not None:
+            return pc_time
+
+        host_epoch = data.get("_ts")
+        if host_epoch is None and isinstance(entry, dict):
+            host_epoch = entry.get("_ts")
+        host_time = self._parse_epoch_datetime(host_epoch)
+        if host_time is not None:
+            return host_time
+
+        gps_datetime = self._parse_epoch_datetime(gps_time)
+        if gps_datetime is not None:
+            if payload in PAYLOADS:
+                self._anchor[payload] = (gps_time, gps_datetime)
+            return gps_datetime
 
         if payload in PAYLOADS and gps_time is not None:
             anchor = self._anchor[payload]
             if anchor is not None:
-                anchor_gps, anchor_dt = anchor
+                anchor_gps, anchor_datetime = anchor
                 delta_s = gps_time - anchor_gps
                 if abs(delta_s) < MAX_ANCHOR_GAP_S:
-                    return anchor_dt + timedelta(seconds=delta_s)
-            # no anchor yet at all (RTC never synced this session): bootstrap
-            # one at "now" so the point is still plotted, using relative
-            # gps_time spacing for everything that follows.
-            now_local = datetime.now().astimezone()
-            self._anchor[payload] = (gps_time, now_local)
-            return now_local
+                    return anchor_datetime + timedelta(seconds=delta_s)
 
-        # no rtc_time, no pc_time, no gps_time at all: last resort
-        return datetime.now().astimezone()
+        monotonic_s = self._finite_value(data.get("monotonic_s"))
+        if payload in PAYLOADS and monotonic_s is not None:
+            anchor = self._monotonic_anchor[payload]
+            if anchor is None:
+                anchor = (monotonic_s, datetime.now(tz=timezone.utc))
+                self._monotonic_anchor[payload] = anchor
+            anchor_monotonic, anchor_datetime = anchor
+            return anchor_datetime + timedelta(
+                seconds=monotonic_s - anchor_monotonic
+            )
+
+        return datetime.now(tz=timezone.utc)
 
     def _ingest_line(self, raw):
         raw = raw.strip()
