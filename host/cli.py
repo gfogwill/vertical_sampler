@@ -1,12 +1,15 @@
 import argparse
+from dataclasses import dataclass
 import json
 import math
 import queue
+import shlex
 import threading
 import time
 from enum import Enum
 import datetime
 import struct
+from pathlib import Path
 
 import serial
 
@@ -105,6 +108,14 @@ _PRESSURE_OFFSET_HPA = {
     Payload.BENI: -1.9,
     Payload.CARLA: 0.0,  # Not yet calibrated against the TSI 4100 reference.
 }
+
+
+@dataclass(frozen=True)
+class ScheduledCommand:
+    scheduled_at: datetime.datetime
+    args: argparse.Namespace
+    line_number: int
+    source: str
 
 
 def _apply_pressure_offset(payload, pressure_hpa):
@@ -242,6 +253,155 @@ def _build_cmd(args):
         raise ValueError("Unknown subcommand: {}".format(args.subcommand))
 
 
+def _parse_schedule_timestamp(value, line_number):
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        timestamp = datetime.datetime.fromisoformat(normalized)
+    except ValueError as error:
+        raise ValueError(
+            "schedule line {} has invalid timestamp {!r}".format(
+                line_number,
+                value,
+            )
+        ) from error
+    if timestamp.tzinfo is None:
+        raise ValueError(
+            "schedule line {} timestamp must include a timezone".format(
+                line_number,
+            )
+        )
+    return timestamp.astimezone(_UTC)
+
+
+def _parse_schedule_command(tokens, line_number):
+    if not tokens:
+        raise ValueError(
+            "schedule line {} has no command".format(line_number)
+        )
+    subcommand = tokens[0]
+    if subcommand not in ("pump", "valve", "data"):
+        raise ValueError(
+            "schedule line {} has unknown command {!r}".format(
+                line_number,
+                subcommand,
+            )
+        )
+    try:
+        payload = Payload(tokens[1])
+    except (IndexError, ValueError) as error:
+        raise ValueError(
+            "schedule line {} has invalid or missing payload".format(
+                line_number,
+            )
+        ) from error
+
+    args = argparse.Namespace(
+        subcommand=subcommand,
+        payload=payload,
+    )
+    if subcommand == "pump":
+        if len(tokens) != 4 or tokens[2] not in ("front", "back", "both"):
+            raise ValueError(
+                "schedule line {} pump syntax is: "
+                "pump PAYLOAD front|back|both on|off".format(
+                    line_number,
+                )
+            )
+        try:
+            state = State(tokens[3])
+        except ValueError as error:
+            raise ValueError(
+                "schedule line {} pump state must be on or off".format(
+                    line_number,
+                )
+            ) from error
+        args.pump_location = tokens[2]
+        args.state = state
+    elif subcommand == "valve":
+        if len(tokens) != 3:
+            raise ValueError(
+                "schedule line {} valve syntax is: "
+                "valve PAYLOAD on|off".format(line_number)
+            )
+        try:
+            state = State(tokens[2])
+        except ValueError as error:
+            raise ValueError(
+                "schedule line {} valve state must be on or off".format(
+                    line_number,
+                )
+            ) from error
+        args.state = state
+    elif len(tokens) != 2:
+        raise ValueError(
+            "schedule line {} data syntax is: data PAYLOAD".format(
+                line_number,
+            )
+        )
+
+    _validate_command_capability(args)
+    return args
+
+
+def load_schedule(path):
+    """Read timestamped CLI commands from a schedule text file.
+
+    Each non-empty, non-comment line has the form:
+
+        2026-09-26T12:00:00Z pump alma front on
+
+    Timestamps must include an explicit timezone. Commands use the same
+    syntax and capability validation as the one-shot CLI subcommands.
+    """
+    entries = []
+    try:
+        source = path.open("r", encoding="utf-8")
+    except OSError as error:
+        raise ValueError(
+            "cannot open schedule file {}: {}".format(path, error)
+        ) from error
+
+    with source:
+        for line_number, raw_line in enumerate(source, 1):
+            try:
+                tokens = shlex.split(raw_line, comments=True, posix=True)
+            except ValueError as error:
+                raise ValueError(
+                    "schedule line {} has invalid quoting: {}".format(
+                        line_number,
+                        error,
+                    )
+                ) from error
+            if not tokens:
+                continue
+            timestamp = _parse_schedule_timestamp(tokens[0], line_number)
+            args = _parse_schedule_command(tokens[1:], line_number)
+            entries.append(
+                ScheduledCommand(
+                    scheduled_at=timestamp,
+                    args=args,
+                    line_number=line_number,
+                    source=raw_line.strip(),
+                )
+            )
+
+    if not entries:
+        raise ValueError("schedule file {} contains no commands".format(path))
+    return sorted(entries, key=lambda entry: entry.scheduled_at)
+
+
+def _scheduled_command_text(args):
+    if args.subcommand == "pump":
+        return "pump {} {} {}".format(
+            args.payload,
+            args.pump_location,
+            args.state,
+        )
+    if args.subcommand == "valve":
+        return "valve {} {}".format(args.payload, args.state)
+    return "data {}".format(args.payload)
+
+
 def _validate_command_capability(args):
     capabilities = _PAYLOAD_CAPABILITIES[args.payload]
     if args.subcommand == "valve" and "valve" not in capabilities:
@@ -361,49 +521,152 @@ def _known_binary_state(data, key):
     return value if value in (0, 1) else None
 
 
-def relay_cmd(args):
+def _send_command_on_serial(ser, args, display=True, response_handler=None):
     _validate_command_capability(args)
     cmd = _build_cmd(args)
     is_data = (args.subcommand == "data")
     max_attempts = MAX_RETRIES if is_data else 1
     response_timeout_s = RETRY_INTERVAL_S if is_data else ACTUATOR_RESPONSE_TIMEOUT_S
-    with find_serial() as ser:
-        time.sleep(0.2)
-        _drain_serial(ser, timeout_s=0.5)
-        for attempt in range(1, max_attempts + 1):
+    _drain_serial(ser, timeout_s=0.5)
+    for attempt in range(1, max_attempts + 1):
+        if display:
             print("Sending command (attempt {}/{})...".format(attempt, max_attempts), end="", flush=True)
-            ser.write(cmd)
-            ser.flush()
-            data = _read_cmd_response(
-                ser,
-                timeout_s=response_timeout_s,
-                accept_telemetry=is_data,
-                expected_payload=args.payload,
-            )
-            if data is not None:
-                is_error = "_error" in data or data.get("msg_type") == _MSG_CMD_ERR
+        ser.write(cmd)
+        ser.flush()
+        data = _read_cmd_response(
+            ser,
+            timeout_s=response_timeout_s,
+            accept_telemetry=is_data,
+            expected_payload=args.payload,
+        )
+        if data is not None:
+            is_error = "_error" in data or data.get("msg_type") == _MSG_CMD_ERR
+            if display:
                 print(" ERROR" if is_error else " OK")
+            if response_handler is not None:
+                response_handler(data)
+            if display:
                 if "_error" in data:
                     print(json.dumps(data, indent=2))
-                    return
-                if args.subcommand == "data":
+                elif args.subcommand == "data":
                     _enrich_data(data, args.payload)
                     pretty_print(data, payload_id=str(args.payload))
                 else:
                     print(json.dumps(data, indent=2))
-                return
-            if not is_data:
+            return not is_error
+        if not is_data:
+            if display:
                 print(" no response; command may have been applied, not retrying.")
-                break
+            break
+        if display:
             print(" no response, retrying...")
-        if is_data:
-            print("ERROR: no response from {} after {} attempts (~{}s).".format(
-                args.payload, max_attempts, max_attempts * response_timeout_s
-            ))
+    if display and is_data:
+        print("ERROR: no response from {} after {} attempts (~{}s).".format(
+            args.payload, max_attempts, max_attempts * response_timeout_s
+        ))
+    elif display:
+        print("ERROR: no command acknowledgement from {}; actuator state is unknown.".format(
+            args.payload
+        ))
+    return False
+
+
+def relay_cmd(args):
+    with find_serial() as ser:
+        time.sleep(0.2)
+        return _send_command_on_serial(ser, args)
+
+
+def run_schedule(
+    entries,
+    run_past_due=False,
+    dry_run=False,
+    now_fn=None,
+    sleep_fn=time.sleep,
+    command_runner=None,
+    stop_event=None,
+):
+    """Execute scheduled commands once in timestamp order."""
+    if now_fn is None:
+        now_fn = lambda: datetime.datetime.now(tz=_UTC)
+    if command_runner is None:
+        command_runner = relay_cmd
+
+    if dry_run:
+        for entry in entries:
+            print(
+                "{}  {}".format(
+                    entry.scheduled_at.isoformat(),
+                    _scheduled_command_text(entry.args),
+                )
+            )
+        print("Dry run: no scheduled commands were sent.")
+        return True
+
+    failures = 0
+    for entry in entries:
+        if stop_event is not None and stop_event.is_set():
+            print("Schedule stopped before line {}.".format(entry.line_number))
+            return False
+        now = now_fn()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=_UTC)
         else:
-            print("ERROR: no command acknowledgement from {}; actuator state is unknown.".format(
-                args.payload
-            ))
+            now = now.astimezone(_UTC)
+        delay_s = (entry.scheduled_at - now).total_seconds()
+        if delay_s < 0 and not run_past_due:
+            print(
+                "Skipping past schedule line {}: {} ({:.0f}s late)".format(
+                    entry.line_number,
+                    _scheduled_command_text(entry.args),
+                    -delay_s,
+                )
+            )
+            continue
+        if delay_s > 0:
+            print(
+                "Waiting {:.1f}s for {}: {}".format(
+                    delay_s,
+                    entry.scheduled_at.isoformat(),
+                    _scheduled_command_text(entry.args),
+                )
+            )
+            if stop_event is not None:
+                if stop_event.wait(delay_s):
+                    print(
+                        "Schedule stopped before line {}.".format(
+                            entry.line_number,
+                        )
+                    )
+                    return False
+            else:
+                sleep_fn(delay_s)
+
+        print(
+            "Executing scheduled line {} at {}: {}".format(
+                entry.line_number,
+                datetime.datetime.now(tz=_UTC).isoformat(),
+                _scheduled_command_text(entry.args),
+            )
+        )
+        try:
+            success = command_runner(entry.args)
+        except (RuntimeError, serial.SerialException) as error:
+            print(
+                "ERROR: scheduled line {} failed: {}".format(
+                    entry.line_number,
+                    error,
+                )
+            )
+            success = False
+        if not success:
+            failures += 1
+
+    if failures:
+        print("{} scheduled command(s) failed.".format(failures))
+        return False
+    print("Schedule complete.")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +679,7 @@ _PAYLOADS_ALL = [Payload.ALMA, Payload.BENI, Payload.CARLA]
 _CMD_POLL_ALL = "poll_all"
 _CMD_POLL_ONE = "poll_one"
 _CMD_CONTROL = "control"
+_CMD_SCHEDULE = "schedule"
 _CMD_QUIT = "quit"
 
 
@@ -486,6 +750,19 @@ class PollWorker(threading.Thread):
             self._log(d)
         return d
 
+    def _send_scheduled(self, ser, args):
+        def handle_response(d):
+            d["_ts"] = time.time()
+            self._enrich(d, args.payload)
+            self._log(d)
+
+        return _send_command_on_serial(
+            ser,
+            args,
+            display=False,
+            response_handler=handle_response,
+        )
+
     def _try_parse_heartbeat(self, ser):
         if ser.in_waiting:
             raw = ser.readline()
@@ -532,6 +809,28 @@ class PollWorker(threading.Thread):
                         _, payload, cmd_bytes = item
                         d = self._send_control(ser, cmd_bytes, payload)
                         self.result_q.put((payload, d))
+                        continue
+                    elif isinstance(item, tuple) and item[0] == _CMD_SCHEDULE:
+                        _, args, done, result = item
+                        error = None
+                        try:
+                            result["success"] = self._send_scheduled(ser, args)
+                        except (RuntimeError, serial.SerialException, ValueError) as exc:
+                            result["success"] = False
+                            error = str(exc)
+                        result["error"] = error
+                        done.set()
+                        self.result_q.put(
+                            (
+                                args.payload,
+                                {
+                                    "_schedule_event": True,
+                                    "success": result["success"],
+                                    "command": _scheduled_command_text(args),
+                                    "error": error,
+                                },
+                            )
+                        )
                         continue
                 except queue.Empty:
                     pass
@@ -606,7 +905,14 @@ def _render_column(win, data, payload_label, col_x, col_w, max_rows):
             row += 1
 
 
-def _run_monitor(payloads, qnh, log_file, auto_qnh=True):
+def _run_monitor(
+    payloads,
+    qnh,
+    log_file,
+    auto_qnh=True,
+    schedule_entries=None,
+    schedule_run_past_due=False,
+):
     import curses
 
     fallback_qnh = qnh if qnh is not None else DEFAULT_QNH_HPA
@@ -617,11 +923,43 @@ def _run_monitor(payloads, qnh, log_file, auto_qnh=True):
 
     state = {p: {} for p in payloads}
     events = []
+    schedule_stop = threading.Event()
+    schedule_thread = None
 
     def add_event(msg):
         events.append((time.time(), msg))
         if len(events) > MAX_EVENTS:
             events.pop(0)
+
+    def run_scheduled_command(args):
+        if schedule_stop.is_set():
+            return False
+        done = threading.Event()
+        result = {}
+        worker.cmd_q.put((_CMD_SCHEDULE, args, done, result))
+        while not done.wait(0.1):
+            if schedule_stop.is_set():
+                return False
+        return bool(result.get("success"))
+
+    if schedule_entries:
+        add_event(
+            "Loaded {} scheduled command(s)".format(
+                len(schedule_entries),
+            )
+        )
+        schedule_thread = threading.Thread(
+            target=run_schedule,
+            kwargs={
+                "entries": schedule_entries,
+                "run_past_due": schedule_run_past_due,
+                "command_runner": run_scheduled_command,
+                "stop_event": schedule_stop,
+            },
+            name="command-schedule",
+            daemon=True,
+        )
+        schedule_thread.start()
 
     def _toggle_pump(payload, location):
         state_key = (
@@ -670,6 +1008,17 @@ def _run_monitor(payloads, qnh, log_file, auto_qnh=True):
                             add_event("{} - no response".format(payload))
                     elif "_error" in d:
                         add_event("Serial error: {}".format(d["_error"]))
+                    elif d.get("_schedule_event"):
+                        status = "OK" if d.get("success") else "FAILED"
+                        detail = d.get("error")
+                        if detail:
+                            status = "{} ({})".format(status, detail)
+                        add_event(
+                            "Scheduled {}: {}".format(
+                                status,
+                                d.get("command", "command"),
+                            )
+                        )
                     else:
                         target = payload
                         if target is None:
@@ -780,6 +1129,7 @@ def _run_monitor(payloads, qnh, log_file, auto_qnh=True):
     try:
         curses.wrapper(draw)
     except Exception as exc:
+        schedule_stop.set()
         worker.cmd_q.put(_CMD_QUIT)
         print("[monitor] curses error ({}), falling back to plain poll.".format(exc))
         worker2 = PollWorker(payloads, qnh_provider, log_file)
@@ -800,6 +1150,11 @@ def _run_monitor(payloads, qnh, log_file, auto_qnh=True):
         for p in payloads:
             if state2[p]:
                 pretty_print(state2[p], payload_id=str(p))
+    finally:
+        schedule_stop.set()
+        if schedule_thread is not None:
+            schedule_thread.join(timeout=2)
+        worker.cmd_q.put(_CMD_QUIT)
     qnh_provider.stop()
 
 
@@ -833,7 +1188,47 @@ def parse_args():
         action="store_true",
         help="Disable automatic FMI QNH updates",
     )
-    mon.add_argument("--log-file", dest="log_file", default=None, metavar="FILE")
+    mon.add_argument(
+        "--log-file",
+        "--json-output",
+        dest="log_file",
+        default=None,
+        metavar="FILE",
+        help="Append JSON telemetry records to FILE",
+    )
+    mon.add_argument(
+        "--schedule",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Run timestamped commands from FILE in the monitor process",
+    )
+    mon.add_argument(
+        "--schedule-run-past-due",
+        action="store_true",
+        help="Execute monitor schedule entries that are past due",
+    )
+
+    schedule = subparsers.add_parser(
+        "schedule",
+        help="Send commands from a timestamped text file",
+    )
+    schedule.add_argument(
+        "schedule_file",
+        type=str,
+        metavar="FILE",
+        help="Schedule file with UTC ISO-8601 timestamps",
+    )
+    schedule.add_argument(
+        "--run-past-due",
+        action="store_true",
+        help="Execute entries that were scheduled before startup",
+    )
+    schedule.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and print the schedule without sending commands",
+    )
 
     return parser.parse_args()
 
@@ -841,12 +1236,33 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     if args.subcommand == "monitor":
+        schedule_entries = None
+        if args.schedule is not None:
+            try:
+                schedule_entries = load_schedule(Path(args.schedule))
+            except ValueError as exc:
+                raise SystemExit("ERROR: {}".format(exc))
         _run_monitor(
             payloads=args.payloads,
             qnh=args.qnh,
             log_file=args.log_file,
             auto_qnh=not args.no_auto_qnh,
+            schedule_entries=schedule_entries,
+            schedule_run_past_due=args.schedule_run_past_due,
         )
+    elif args.subcommand == "schedule":
+        try:
+            schedule_entries = load_schedule(
+                Path(args.schedule_file)
+            )
+            success = run_schedule(
+                schedule_entries,
+                run_past_due=args.run_past_due,
+                dry_run=args.dry_run,
+            )
+        except ValueError as exc:
+            raise SystemExit("ERROR: {}".format(exc))
+        raise SystemExit(0 if success else 1)
     else:
         try:
             relay_cmd(args)

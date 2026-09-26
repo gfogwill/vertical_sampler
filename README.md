@@ -127,11 +127,52 @@ python host/cli.py data carla
 python host/cli.py pump carla front on
 ```
 
+Scheduled commands can be sent from a text file using UTC ISO-8601
+timestamps. The command after each timestamp uses the same syntax as the
+one-shot CLI commands:
+
+```text
+# timestamp command payload [location] state
+2026-09-26T12:00:00Z pump alma front on
+2026-09-26T12:30:00Z valve beni off
+2026-09-26T13:00:00+00:00 pump alma front off
+```
+
+Run the schedule with:
+
+```bash
+python host/cli.py schedule sampling_schedule.txt
+```
+
+To run the schedule together with the monitor and JSON telemetry logging,
+use the monitor mode so both features share one serial connection:
+
+```bash
+python host/cli.py monitor \
+  --schedule sampling_schedule.txt \
+  --json-output telemetry.jsonl
+```
+
+`--json-output` is an alias for `--log-file`. Add
+`--schedule-run-past-due` if entries from before startup should be executed
+immediately.
+
+Entries that are already past when the scheduler starts are skipped by
+default. Use `--run-past-due` to execute them immediately, or
+`--dry-run` to validate and print the schedule without sending commands.
+Actuator commands retain the normal one-shot delivery and acknowledgement
+behavior; a missing acknowledgement is reported as a failure and is never
+silently retried.
+
 `host/quickview.py` is available for local data inspection and visualization.
 It displays separate Alma and Beni OPC-N3 heatmaps using the standard
 0.35–40 µm diameter bins on a logarithmic diameter axis. Heatmap colors use
 logarithmic normalization and are corrected to counts per logarithmic diameter
 interval (`dN/dlog10(Dp)`); they are not yet normalized by sampled air volume.
+All shared time axes are explicitly formatted in UTC. QuickView prefers the
+payload UTC/RTC timestamp, then the host log timestamp; when a payload has no
+valid absolute clock, its `monotonic_s` intervals are retained instead of
+assigning one artificial second per log line.
 Carla is included in the common sensor plots but has no OPC or electro-valve
 controls.
 
@@ -145,8 +186,7 @@ python host/weather_dashboard.py
 
 The dashboard refreshes every 10 minutes and combines:
 
-- ECMWF IFS boundary-layer height and surface forecast, retrieved through
-  Open-Meteo.
+- ECMWF IFS boundary-layer height, retrieved through Open-Meteo.
 - Altitude-resolved cloud fraction from Cloudnet's preferred forecast model
   for Kenttärova (normally MEPS), with liquid, ice and precipitating
   hydrometeor contours.
@@ -157,7 +197,9 @@ The dashboard refreshes every 10 minutes and combines:
   humidity profile, including potential temperature for visually identifying
   stable layers and likely boundary-layer tops.
 - The latest available 00 or 12 UTC Sodankylä radiosonde profile from the
-  University of Wyoming archive.
+  University of Wyoming archive, including low-level horizontal wind-speed
+  and wind-direction lines with meteorological wind barbs at 100 m intervals.
+  Half barbs represent 2.5 m/s, full barbs 5 m/s, and flags 25 m/s.
 
 Cloudnet NetCDF files are cached under
 `~/.cache/vertical_sampler/weather`, and are downloaded again only when their

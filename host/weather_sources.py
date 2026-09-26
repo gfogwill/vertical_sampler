@@ -84,6 +84,8 @@ class Profile:
     source_name: str
     potential_temperature_c: object = None
     quality_note: str = ""
+    wind_direction_deg: object = None
+    wind_speed_mps: object = None
 
 
 def _request_bytes(url, timeout_s=30):
@@ -483,20 +485,39 @@ def parse_uwyo_sounding(page, observation_time):
 
     rows = []
     for line in pre_match.group(1).splitlines():
-        if len(line) < 35:
+        fields = line.split()
+        if len(fields) < 5:
             continue
         try:
-            pressure = float(line[0:7])
-            height = float(line[7:14])
-            temperature = float(line[14:21])
-            humidity = float(line[28:35])
+            pressure = float(fields[0])
+            height = float(fields[1])
+            temperature = float(fields[2])
+            humidity = float(fields[4])
         except ValueError:
             continue
         if not all(math.isfinite(value) for value in (
             pressure, height, temperature, humidity
         )):
             continue
-        rows.append((height, temperature, humidity))
+        direction = float("nan")
+        speed_mps = float("nan")
+        if len(fields) >= 8:
+            try:
+                direction = float(fields[6])
+                speed_knots = float(fields[7])
+                if (
+                    not math.isfinite(direction)
+                    or not 0 <= direction <= 360
+                    or not math.isfinite(speed_knots)
+                    or speed_knots < 0
+                ):
+                    direction = float("nan")
+                    speed_mps = float("nan")
+                else:
+                    speed_mps = speed_knots * 0.514444
+            except ValueError:
+                pass
+        rows.append((height, temperature, humidity, direction, speed_mps))
     if len(rows) < 5:
         raise WeatherSourceError("Sodankylä sounding contains too few profile levels")
 
@@ -509,6 +530,8 @@ def parse_uwyo_sounding(page, observation_time):
         relative_humidity_percent=[row[2] for row in rows],
         source_date=observation_time.date(),
         source_name="Sodankylä radiosonde",
+        wind_direction_deg=[row[3] for row in rows],
+        wind_speed_mps=[row[4] for row in rows],
     )
 
 

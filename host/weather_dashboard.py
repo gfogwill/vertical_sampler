@@ -197,23 +197,79 @@ def _regular_model_cloud_grid(model_cloud, max_height_m, step_m=25.0):
     )
 
 
+def _wind_barb_samples(
+    heights_m,
+    directions_deg,
+    speeds_mps,
+    interval_m=100.0,
+    max_height_m=LOW_CLOUD_LIMIT_M,
+):
+    """Interpolate wind vectors onto a regular height grid for barbs."""
+    heights = np.asarray(heights_m, dtype=float)
+    directions = np.asarray(directions_deg, dtype=float)
+    speeds = np.asarray(speeds_mps, dtype=float)
+    valid = (
+        np.isfinite(heights)
+        & (heights >= 0)
+        & (heights <= max_height_m)
+        & np.isfinite(directions)
+        & np.isfinite(speeds)
+        & (speeds >= 0)
+    )
+    if np.count_nonzero(valid) < 2 or interval_m <= 0:
+        return np.array([]), np.array([]), np.array([])
+
+    heights = heights[valid]
+    directions = np.deg2rad(directions[valid])
+    speeds = speeds[valid]
+    order = np.argsort(heights)
+    heights = heights[order]
+    eastward = (-speeds * np.sin(directions))[order]
+    northward = (-speeds * np.cos(directions))[order]
+    unique_heights, unique_indices = np.unique(heights, return_index=True)
+    eastward = eastward[unique_indices]
+    northward = northward[unique_indices]
+    if unique_heights.size < 2:
+        return np.array([]), np.array([]), np.array([])
+
+    target_heights = np.arange(
+        math.ceil(unique_heights[0] / interval_m) * interval_m,
+        min(unique_heights[-1], max_height_m) + interval_m * 0.5,
+        interval_m,
+    )
+    if target_heights.size == 0:
+        return np.array([]), np.array([]), np.array([])
+    return (
+        target_heights,
+        np.interp(target_heights, unique_heights, eastward),
+        np.interp(target_heights, unique_heights, northward),
+    )
+
+
 class WeatherDashboard:
     def __init__(self, day, cache_dir=None):
         self.fixed_day = day
         self.day = day or datetime.date.today()
         self.cache = CloudnetCache(cache_dir)
-        self.figure = plt.figure(figsize=(16, 10), constrained_layout=True)
+        self.figure = plt.figure(figsize=(18, 10), constrained_layout=True)
         self.figure.canvas.manager.set_window_title(
             "Matorova low-cloud dashboard"
         )
-        grid = self.figure.add_gridspec(3, 3, height_ratios=(0.34, 1, 1))
+        grid = self.figure.add_gridspec(3, 4, height_ratios=(0.34, 1, 1))
         self.summary_axis = self.figure.add_subplot(grid[0, :])
         self.forecast_axis = self.figure.add_subplot(grid[1, :2])
-        self.weather_axis = self.figure.add_subplot(grid[1, 2])
+        self.wind_axis = self.figure.add_subplot(grid[1, 2])
+        self.wind_barb_axis = self.figure.add_subplot(
+            grid[1, 3],
+            sharey=self.wind_axis,
+        )
+        self.wind_direction_axis = self.wind_axis.twiny()
         self.cloud_axis = self.figure.add_subplot(grid[2, 0])
-        self.temperature_axis = self.figure.add_subplot(grid[2, 1])
-        self.humidity_axis = self.figure.add_subplot(grid[2, 2], sharey=self.temperature_axis)
-        self.weather_humidity_axis = self.weather_axis.twinx()
+        self.temperature_axis = self.figure.add_subplot(grid[2, 1:3])
+        self.humidity_axis = self.figure.add_subplot(
+            grid[2, 3],
+            sharey=self.temperature_axis,
+        )
         self.forecast_cloud_colorbar = None
         self.animation = None
 
@@ -228,19 +284,28 @@ class WeatherDashboard:
         axes = (
             self.summary_axis,
             self.forecast_axis,
-            self.weather_axis,
-            self.weather_humidity_axis,
+            self.wind_axis,
+            self.wind_barb_axis,
+            self.wind_direction_axis,
             self.cloud_axis,
             self.temperature_axis,
             self.humidity_axis,
         )
         for axis in axes:
             axis.clear()
+        for axis in (
+            self.summary_axis,
+            self.forecast_axis,
+            self.wind_axis,
+            self.cloud_axis,
+            self.temperature_axis,
+            self.humidity_axis,
+        ):
             axis.grid(True, alpha=0.25)
 
         self._draw_summary(data)
         self._draw_forecast(data.forecast, data.model_cloud)
-        self._draw_surface_weather(data.forecast)
+        self._draw_wind_profile(data.sounding)
         self._draw_cloud_layers(data.cloud_layers)
         self._draw_profiles(data.mwr_profile, data.sounding)
         self.figure.suptitle(
@@ -456,48 +521,158 @@ class WeatherDashboard:
         )
         axis.set_xlabel("Local time")
 
-    def _draw_surface_weather(self, forecast):
-        axis = self.weather_axis
-        axis.set_title("Surface forecast")
-        if forecast is None:
-            axis.text(0.5, 0.5, "Forecast unavailable", ha="center", va="center")
+    def _draw_wind_profile(self, sounding):
+        axis = self.wind_axis
+        barb_axis = self.wind_barb_axis
+        direction_axis = self.wind_direction_axis
+        axis.set_title("Wind speed and direction — Sodankylä")
+        axis.set_ylabel("Height AGL (m)")
+        axis.set_xlabel("Wind speed (m/s)", color="#2a9d8f")
+        axis.set_ylim(0, LOW_CLOUD_LIMIT_M)
+        axis.tick_params(axis="x", labelcolor="#2a9d8f")
+        direction_axis.set_ylim(0, LOW_CLOUD_LIMIT_M)
+        direction_axis.xaxis.set_ticks_position("top")
+        direction_axis.xaxis.set_label_position("top")
+        direction_axis.set_xlabel(
+            "Wind direction (° from north)",
+            color="#e76f51",
+        )
+        direction_axis.tick_params(axis="x", labelcolor="#e76f51")
+        direction_axis.grid(False)
+        barb_axis.set_ylim(0, LOW_CLOUD_LIMIT_M)
+        barb_axis.set_xlim(0, 1)
+        barb_axis.set_xticks([])
+        barb_axis.set_title("100 m barbs", fontsize=9)
+        barb_axis.tick_params(
+            axis="y",
+            left=False,
+            labelleft=False,
+            right=False,
+            labelright=False,
+        )
+        barb_axis.grid(False)
+        for spine in barb_axis.spines.values():
+            spine.set_visible(False)
+        if sounding is None:
+            axis.text(
+                0.5,
+                0.5,
+                "Sodankylä sounding unavailable",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+            )
             return
-        axis.plot(
-            _local_plot_times(forecast.times),
-            forecast.temperature_c,
-            color="#d62728",
-            label="Temperature (°C)",
+
+        directions = getattr(sounding, "wind_direction_deg", None)
+        speeds = getattr(sounding, "wind_speed_mps", None)
+        if directions is None or speeds is None:
+            axis.text(
+                0.5,
+                0.5,
+                "Wind data unavailable in sounding",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+            )
+            return
+
+        heights = np.asarray(sounding.height_agl_m, dtype=float)
+        directions = np.asarray(directions, dtype=float)
+        speeds = np.asarray(speeds, dtype=float)
+        valid = (
+            np.isfinite(heights)
+            & (heights >= 0)
+            & (heights <= LOW_CLOUD_LIMIT_M)
+            & np.isfinite(directions)
+            & np.isfinite(speeds)
+            & (speeds >= 0)
         )
-        axis.plot(
-            _local_plot_times(forecast.times),
-            forecast.wind_speed_kmh,
-            color="#2ca02c",
-            label="Wind (km/h)",
+        if not np.any(valid):
+            axis.text(
+                0.5,
+                0.5,
+                "No valid low-level wind data in sounding",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+            )
+            return
+
+        line_heights = heights[valid]
+        line_speeds = speeds[valid]
+        line_directions_deg = directions[valid]
+        line_order = np.argsort(line_heights)
+        line_heights = line_heights[line_order]
+        line_speeds = line_speeds[line_order]
+        line_directions_deg = line_directions_deg[line_order]
+        line_directions = line_directions_deg.copy()
+        wrap_jumps = np.abs(np.diff(line_directions)) > 180.0
+        line_directions[1:][wrap_jumps] = np.nan
+        speed_line, = axis.plot(
+            line_speeds,
+            line_heights,
+            color="#2a9d8f",
+            linewidth=1.8,
+            label="Wind speed",
         )
-        axis.plot(
-            _local_plot_times(forecast.times),
-            forecast.precipitation_mm,
-            color="#1f77b4",
-            label="Precipitation (mm)",
+        direction_line, = direction_axis.plot(
+            line_directions,
+            line_heights,
+            color="#e76f51",
+            linewidth=1.5,
+            label="Wind direction",
         )
-        humidity_axis = self.weather_humidity_axis
-        humidity_axis.yaxis.tick_right()
-        humidity_axis.yaxis.set_label_position("right")
-        humidity_axis.plot(
-            _local_plot_times(forecast.times),
-            forecast.relative_humidity_percent,
-            color="#9467bd",
-            linestyle="--",
-            label="RH (%)",
+        axis.set_xlim(
+            0,
+            max(5.0, math.ceil(np.nanmax(line_speeds) / 5.0) * 5.0),
         )
-        humidity_axis.set_ylim(0, 100)
-        humidity_axis.set_ylabel("Relative humidity (%)")
-        handles, labels = axis.get_legend_handles_labels()
-        rh_handles, rh_labels = humidity_axis.get_legend_handles_labels()
-        axis.legend(handles + rh_handles, labels + rh_labels, fontsize=8)
-        axis.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-        axis.set_xlabel("Local time")
-        axis.tick_params(axis="x", rotation=30)
+        direction_axis.set_xlim(0, 360)
+        direction_axis.set_xticks((0, 90, 180, 270, 360))
+        axis.legend(
+            (speed_line, direction_line),
+            ("Wind speed", "Wind direction"),
+            loc="upper left",
+            fontsize=8,
+        )
+
+        barb_heights, eastward, northward = _wind_barb_samples(
+            heights,
+            directions,
+            speeds,
+        )
+        if barb_heights.size:
+            barb_axis.barbs(
+                np.full(barb_heights.shape, 0.5),
+                barb_heights,
+                eastward,
+                northward,
+                length=6,
+                linewidth=0.8,
+                color="#264653",
+                barb_increments={"half": 2.5, "full": 5, "flag": 25},
+            )
+        else:
+            barb_axis.text(
+                0.5,
+                0.5,
+                "No\nbarbs",
+                ha="center",
+                va="center",
+                transform=barb_axis.transAxes,
+            )
+        axis.text(
+            0.04,
+            0.04,
+            "{} ({})".format(
+                sounding.source_name,
+                _format_time(sounding.observation_time),
+            ),
+            transform=axis.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=8,
+        )
 
     def _draw_cloud_layers(self, layers):
         axis = self.cloud_axis
