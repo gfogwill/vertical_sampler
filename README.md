@@ -138,6 +138,15 @@ one-shot CLI commands:
 2026-09-26T13:00:00+00:00 pump alma front off
 ```
 
+An editable example is provided in
+[`sampling_schedule.example.txt`](sampling_schedule.example.txt). Copy it
+to a working schedule, then change and review the timestamps before running:
+
+```bash
+cp sampling_schedule.example.txt sampling_schedule.txt
+python host/cli.py schedule sampling_schedule.txt --dry-run
+```
+
 Run the schedule with:
 
 ```bash
