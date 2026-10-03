@@ -75,6 +75,7 @@ FIELDS = [
     ("opc_temperature",             "Temperature",       "\u00b0C",   "OPC"),
     ("opc_humidity",                "Humidity",          "%RH",   "OPC"),
     ("opc_sample_flow",             "Sample flow",       "mL/s",  "OPC"),
+    ("opc_sampling_period_s",       "Sampling period",   "s",     "OPC"),
     ("opc_laser_status",            "Laser status",      "",      "OPC"),
     ("battery_voltage",             "Battery",           "V",     "System"),
     ("uplink_rssi",                 "RSSI ground->payload", "dBm", "System"),

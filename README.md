@@ -177,7 +177,15 @@ silently retried.
 It displays separate Alma and Beni OPC-N3 heatmaps using the standard
 0.35–40 µm diameter bins on a logarithmic diameter axis. Heatmap colors use
 logarithmic normalization and are corrected to counts per logarithmic diameter
-interval (`dN/dlog10(Dp)`); they are not yet normalized by sampled air volume.
+interval (`dN/dlog10(Dp)`). New telemetry includes the OPC histogram sample
+period, so QuickView and the plotting scripts normalize distributions to
+particles/cm³. Older logs without that field remain relative unless a known
+period is passed explicitly, for example:
+
+```bash
+python host/quickview.py --log-file ground_dump.jsonl \
+    --opc-sampling-period-s <seconds>
+```
 All shared time axes are explicitly formatted in UTC. QuickView prefers the
 payload UTC/RTC timestamp, then the host log timestamp; when a payload has no
 valid absolute clock, its `monotonic_s` intervals are retained instead of
@@ -252,9 +260,31 @@ Each payload sample is logged as JSONL when an SD card is available and sent ove
 | `pump_front_state` | int | 0 or 1 |
 | `pump_back_state` | int/null | 0 or 1; unavailable on Carla |
 | `valve_state` | int/null | 0 or 1; unavailable on Carla |
+| `opc_bin_0` ... `opc_bin_23` | uint16/null | Raw OPC-N3 particle counts per histogram bin |
+| `opc_temperature` | float/null | OPC temperature, °C |
+| `opc_humidity` | float/null | OPC relative humidity, %RH |
+| `opc_sample_flow` | float/null | OPC sample flow, mL/s |
+| `opc_sampling_period_s` | float/null | OPC histogram sampling period, s |
+| `opc_laser_status` | int/null | OPC laser status |
 
-The binary telemetry format remains identical for all payloads. Carla sends
-fill values for the unavailable back pump, electro-valve and OPC-N3 fields.
+For a histogram with a valid flow and sampling period, the instrument-reported
+number concentration for each bin is:
+
+```text
+particles/cm³ = raw_bin_count / (opc_sample_flow * opc_sampling_period_s)
+```
+
+The conversion uses the measured per-histogram sample volume; it is a number
+concentration reported by the OPC, not a mass concentration or a correction
+for optical efficiency, coincidence losses, inlet losses, humidity, or particle
+refractive index. Historical logs that predate `opc_sampling_period_s` can be
+plotted with `--opc-sampling-period-s <seconds>` only when that period is known.
+
+The current binary telemetry format is shared by all payloads. The ground
+station also accepts the immediately preceding packet format and legacy
+pre-OPC packets; those formats decode `opc_sampling_period_s` as unavailable.
+Carla sends fill values for the unavailable back pump, electro-valve and OPC-N3
+fields.
 Commands targeting those unavailable devices are rejected by both the host
 CLI and Carla firmware.
 

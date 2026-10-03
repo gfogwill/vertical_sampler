@@ -26,8 +26,17 @@ KEYS = [
     ("opc_temperature", "f"),
     ("opc_humidity", "f"),
     ("opc_sample_flow", "f"),
+    ("opc_sampling_period_s", "f"),
     ("opc_laser_status", "i"),
     ("payload_id", "10s"),
+]
+
+# Current wire format before opc_sampling_period_s was added. Keep accepting
+# this packet size while payloads and the ground station are updated together.
+_KEYS_V1 = [
+    (key, fmt)
+    for key, fmt in KEYS
+    if key != "opc_sampling_period_s"
 ]
 
 # Legacy KEYS: pre-OPC wire format (no opc_* fields), still without msg_type.
@@ -52,10 +61,12 @@ _KEYS_LEGACY = [
 ]
 
 FORMAT = "<" + "".join([t for _, t in KEYS])
+_FORMAT_V1 = "<" + "".join([t for _, t in _KEYS_V1])
 _FORMAT_LEGACY = "<" + "".join([t for _, t in _KEYS_LEGACY])
 
 # Pre-computed sizes so callers can sanity-check incoming bytes.
 WIRE_SIZE = struct.calcsize(FORMAT)
+WIRE_SIZE_V1 = struct.calcsize(_FORMAT_V1)
 LEGACY_SIZE = struct.calcsize(_FORMAT_LEGACY)
 
 INT_FILLVAL = -999999
@@ -111,25 +122,28 @@ def dict2bytes(d: dict) -> bytes:
 def bytes2dict(b) -> dict:
     """Deserialize wire bytes to a dict.
 
-    Accepts both the current FORMAT (with msg_type and opc_* fields,
-    WIRE_SIZE bytes) and the legacy FORMAT (pre-OPC, without msg_type,
-    LEGACY_SIZE bytes). Any other length raises ValueError with a
-    descriptive message so callers can log it instead of swallowing it
-    silently.
+    Accepts the current FORMAT, the immediately preceding FORMAT without
+    opc_sampling_period_s, and the legacy pre-OPC FORMAT. Any other length
+    raises ValueError with a descriptive message so callers can log it
+    instead of swallowing it silently.
     """
     n = len(b)
     if n == WIRE_SIZE:
         keys_used = KEYS
         fmt_used = FORMAT
-        legacy = False
+        packet_version = "current"
+    elif n == WIRE_SIZE_V1:
+        keys_used = _KEYS_V1
+        fmt_used = _FORMAT_V1
+        packet_version = "v1"
     elif n == LEGACY_SIZE:
         keys_used = _KEYS_LEGACY
         fmt_used = _FORMAT_LEGACY
-        legacy = True
+        packet_version = "legacy"
     else:
         raise ValueError(
-            "pack: bad packet length {} (expected {} or {})".format(
-                n, WIRE_SIZE, LEGACY_SIZE
+            "pack: bad packet length {} (expected {}, {}, or {})".format(
+                n, WIRE_SIZE, WIRE_SIZE_V1, LEGACY_SIZE
             )
         )
     tup = struct.unpack(fmt_used, b)
@@ -143,8 +157,11 @@ def bytes2dict(b) -> dict:
         else:
             result[k] = v
 
-    if legacy:
+    if packet_version == "v1":
+        result["opc_sampling_period_s"] = None
+    elif packet_version == "legacy":
         # Tag as telemetry so downstream code can use msg_type safely
         result["msg_type"] = MSG_TELEMETRY
+        result["opc_sampling_period_s"] = None
 
     return result

@@ -59,6 +59,7 @@ def _update_opc_histogram(data,opc,logger,status_led):
         data["opc_temperature"]=opc._convert_temperature(raw["temperature_raw"])
         data["opc_humidity"]=opc._convert_relative_humidity(raw["relative_humidity_raw"])
         data["opc_sample_flow"]=raw["sfr_raw"]/100.0
+        data["opc_sampling_period_s"]=raw["sampling_period_raw"]/100.0
         data["opc_laser_status"]=raw["laser_status"]
         total=sum(raw["bin_{}".format(i)] for i in range(24))
         logger.info("OPC histogram read: raw_total={} laser={}".format(total,raw["laser_status"]))
@@ -127,7 +128,7 @@ def main_loop(lora,payload_id,logger,spi=None,shared_spi=None,pump_locations=("f
         logger.warning("OPC-N3 disabled: no shared SPI bus provided")
     data=_snapshot(payload_id,pump,valve,power,logger); data["flow"]=None; data["uplink_rssi"]=None
     for i in range(24): data["opc_bin_{}".format(i)]=None
-    data["opc_temperature"]=None; data["opc_humidity"]=None; data["opc_sample_flow"]=None; data["opc_laser_status"]=None
+    data["opc_temperature"]=None; data["opc_humidity"]=None; data["opc_sample_flow"]=None; data["opc_sampling_period_s"]=None; data["opc_laser_status"]=None
     if gps is not None: data.update(gps.fields())
     now=time.monotonic(); next_heartbeat=now+config.HEARTBEAT_OFFSETS.get(payload_id,0); next_safety=now
     next_sht85=now; next_pressure=now+2.0; next_flow=now+4.0

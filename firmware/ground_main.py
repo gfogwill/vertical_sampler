@@ -26,6 +26,7 @@ POLL.register(sys.stdin, 1)
 
 # Expected wire sizes — used for a fast pre-check before struct.unpack.
 _WIRE_SIZE = getattr(pack, "WIRE_SIZE", None)
+_WIRE_SIZE_V1 = getattr(pack, "WIRE_SIZE_V1", None)
 _LEGACY_SIZE = getattr(pack, "LEGACY_SIZE", None)
 
 
@@ -53,9 +54,20 @@ def _parse_packet(msg):
         return None
     n = len(msg)
     # Fast pre-check: if we know the expected sizes, reject obviously wrong lengths.
-    if _WIRE_SIZE is not None and _LEGACY_SIZE is not None:
-        if n not in (_WIRE_SIZE, _LEGACY_SIZE):
-            print("WARN pack: bad len={} (want {} or {})".format(n, _WIRE_SIZE, _LEGACY_SIZE))
+    if (
+        _WIRE_SIZE is not None
+        and _WIRE_SIZE_V1 is not None
+        and _LEGACY_SIZE is not None
+    ):
+        if n not in (_WIRE_SIZE, _WIRE_SIZE_V1, _LEGACY_SIZE):
+            print(
+                "WARN pack: bad len={} (want {}, {}, or {})".format(
+                    n,
+                    _WIRE_SIZE,
+                    _WIRE_SIZE_V1,
+                    _LEGACY_SIZE,
+                )
+            )
             return None
     try:
         return pack.bytes2dict(msg)

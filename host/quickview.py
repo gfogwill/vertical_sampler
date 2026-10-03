@@ -5,6 +5,7 @@ QuickView: live ground control dashboard for JSONL backups written by cli.py --l
 Usage:
 python host/quickview.py --log-file ground_dump.jsonl
 python host/quickview.py -f ground_dump.jsonl --qnh 1015.7 --max-points 600
+python host/quickview.py -f legacy.jsonl --opc-sampling-period-s 10
 
 Supported JSON line formats:
 - {"pc_time": "...", "payload": "alma", "data": {...}} (wrapped)
@@ -17,8 +18,10 @@ Panels (top to bottom, shared UTC X axis):
 3. Altitude (m) -> GPS (solid) vs pressure-derived via QNH (dashed)
 4. Relative humidity (%)
 5. Flow (L/min, left axis) + cumulative sampled volume (L, right axis)
-6. Alma OPC-N3 size-distribution heatmap: time x diameter, log-scaled counts
-7. Beni OPC-N3 size-distribution heatmap: time x diameter, log-scaled counts
+6. Alma OPC-N3 size-distribution heatmap: time x diameter, log-scaled
+   dN/dlog10(Dp), in particles/cm³ when the histogram period is available
+7. Beni OPC-N3 size-distribution heatmap: time x diameter, log-scaled
+   dN/dlog10(Dp), in particles/cm³ when the histogram period is available
 8. Alma and Beni OPC-N3 scalars: temperature / humidity / sample flow + laser status
 """
 
@@ -98,6 +101,15 @@ def parse_args():
                    help="Dashboard visual theme")
     p.add_argument("--stale-after", type=float, default=90.0,
                    help="Seconds without data before a payload/actuator is marked stale")
+    p.add_argument(
+        "--opc-sampling-period-s",
+        type=float,
+        default=None,
+        help=(
+            "Known OPC histogram sampling period in seconds for legacy logs "
+            "that do not contain opc_sampling_period_s"
+        ),
+    )
     return p.parse_args()
 
 
@@ -125,10 +137,31 @@ def baro_altitude_m(pressure_hpa, qnh_hpa):
 
 
 class QuickView:
-    def __init__(self, log_file, max_points, stale_after, theme, qnh, auto_qnh=True):
+    def __init__(
+        self,
+        log_file,
+        max_points,
+        stale_after,
+        theme,
+        qnh,
+        auto_qnh=True,
+        opc_sampling_period_s=None,
+    ):
         self.log_file = log_file
         self.max_points = max_points if max_points > 0 else None
         self.stale_after = stale_after
+        if opc_sampling_period_s is None:
+            self.opc_sampling_period_s = None
+        else:
+            try:
+                self.opc_sampling_period_s = float(opc_sampling_period_s)
+            except (TypeError, ValueError):
+                raise ValueError("opc_sampling_period_s must be a positive number")
+            if (
+                not math.isfinite(self.opc_sampling_period_s)
+                or self.opc_sampling_period_s <= 0
+            ):
+                raise ValueError("opc_sampling_period_s must be a positive number")
         fallback_qnh = qnh if qnh is not None else DEFAULT_QNH_HPA
         self.qnh_provider = QnhProvider(
             fallback_qnh=fallback_qnh,
@@ -212,8 +245,18 @@ class QuickView:
         self._opc_time_history = {
             p: deque(maxlen=self.max_points) for p in OPC_PAYLOADS
         }
+        self._opc_flow_history = {
+            p: deque(maxlen=self.max_points) for p in OPC_PAYLOADS
+        }
+        self._opc_period_history = {
+            p: deque(maxlen=self.max_points) for p in OPC_PAYLOADS
+        }
+        self._opc_period_source_history = {
+            p: deque(maxlen=self.max_points) for p in OPC_PAYLOADS
+        }
         self._opc_mesh = {p: None for p in OPC_PAYLOADS}
         self._opc_colorbar = {p: None for p in OPC_PAYLOADS}
+        self._opc_mode_text = {}
 
         self._init_lines()
         self._style_axes()
@@ -310,9 +353,17 @@ class QuickView:
             ax.set_yticklabels(
                 [("{:.2g}".format(value)) for value in OPC_N3_DIAMETER_TICKS_UM]
             )
-            ax.text(0.995, 0.94, "{} log dN/dlog10(Dp)".format(payload.upper()),
-                    transform=ax.transAxes, fontsize=7.5, color=pal["text_muted"],
-                    ha="right", va="top", fontfamily="monospace")
+            self._opc_mode_text[payload] = ax.text(
+                0.995,
+                0.94,
+                "{} dN/dlog10(Dp): awaiting sample period".format(payload.upper()),
+                transform=ax.transAxes,
+                fontsize=7.5,
+                color=pal["text_muted"],
+                ha="right",
+                va="top",
+                fontfamily="monospace",
+            )
         self.ax_opc_scalars.text(0.995, 0.94, "solid=temp  dash=humidity  dot=flow  dashdot=laser",
                                   transform=self.ax_opc_scalars.transAxes,
                                   fontsize=7.5, color=pal["text_muted"], ha="right", va="top", fontfamily="monospace")
@@ -550,6 +601,26 @@ class QuickView:
             if any_bin:
                 self._opc_bin_history[payload].append(bin_vals)
                 self._opc_time_history[payload].append(dt_local)
+                flow = self._finite_value(d.get("opc_sample_flow"))
+                if flow is not None and flow <= 0:
+                    flow = None
+                measured_period = self._finite_value(
+                    d.get("opc_sampling_period_s")
+                )
+                if measured_period is not None and measured_period <= 0:
+                    measured_period = None
+                if measured_period is not None:
+                    period = measured_period
+                    period_source = "measured"
+                elif self.opc_sampling_period_s is not None:
+                    period = self.opc_sampling_period_s
+                    period_source = "assumed"
+                else:
+                    period = None
+                    period_source = None
+                self._opc_flow_history[payload].append(flow)
+                self._opc_period_history[payload].append(period)
+                self._opc_period_source_history[payload].append(period_source)
 
             for key in ("opc_temperature", "opc_humidity", "opc_sample_flow"):
                 val = d.get(key)
@@ -587,20 +658,50 @@ class QuickView:
 
         times = list(self._opc_time_history[payload])
         bins = list(self._opc_bin_history[payload])
+        flows = list(self._opc_flow_history[payload])
+        periods = list(self._opc_period_history[payload])
+        period_sources = list(self._opc_period_source_history[payload])
 
         if n > self.OPC_HEATMAP_MAX_COLS:
             step = n // self.OPC_HEATMAP_MAX_COLS
             times = times[::step]
             bins = bins[::step]
+            flows = flows[::step]
+            periods = periods[::step]
+            period_sources = period_sources[::step]
             n = len(times)
 
         data = np.array(bins, dtype=float).T  # shape (24, n)
 
-        # Convert counts per bin to counts per logarithmic diameter interval.
-        # This prevents the wider upper-size bins from appearing more intense
-        # solely because they cover a larger diameter range.
+        flows = np.asarray(
+            [
+                float(value) if value is not None else float("nan")
+                for value in flows
+            ],
+            dtype=float,
+        )
+        periods = np.asarray(
+            [
+                float(value) if value is not None else float("nan")
+                for value in periods
+            ],
+            dtype=float,
+        )
+        valid_period_columns = np.isfinite(periods) & (periods > 0)
+        if np.any(valid_period_columns):
+            denominators = flows * periods
+            # Do not mix a relative proxy column into an absolute heatmap.
+            denominators[~valid_period_columns] = float("nan")
+            concentration_mode = "absolute"
+        else:
+            denominators = flows
+            concentration_mode = "relative"
+
+        # Convert counts to concentration and then to counts per logarithmic
+        # diameter interval.  One mL equals one cm³.
         log_bin_widths = np.diff(np.log10(np.asarray(OPC_N3_BIN_EDGES_UM)))
-        data = data / log_bin_widths[:, None]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            data = data / denominators[None, :] / log_bin_widths[:, None]
         data = np.ma.masked_where(~np.isfinite(data) | (data <= 0), data)
         xnums = mdates.date2num(times)
 
@@ -617,8 +718,13 @@ class QuickView:
         y_edges = np.asarray(OPC_N3_BIN_EDGES_UM)
 
         positive = data.compressed()
-        vmax = max(10.0, float(np.max(positive))) if positive.size else 10.0
-        count_norm = LogNorm(vmin=1.0, vmax=vmax)
+        if positive.size:
+            vmin = max(float(np.min(positive)), 1e-6)
+            vmax = max(vmin * 10.0, float(np.max(positive)))
+        else:
+            vmin = 1e-6
+            vmax = 10.0
+        count_norm = LogNorm(vmin=vmin, vmax=vmax)
         count_cmap = plt.get_cmap("magma").copy()
         count_cmap.set_bad(color=self.palette["panel"], alpha=0.0)
 
@@ -632,14 +738,38 @@ class QuickView:
             self._opc_colorbar[payload] = self.fig.colorbar(
                 self._opc_mesh[payload], ax=ax, pad=0.01, fraction=0.02
             )
-            self._opc_colorbar[payload].set_label(
-                "log dN/dlog10(Dp)", fontsize=8, color=self.palette["text_muted"]
-            )
             self._opc_colorbar[payload].ax.tick_params(
                 labelsize=7.5, colors=self.palette["text_muted"]
             )
         else:
             self._opc_colorbar[payload].update_normal(self._opc_mesh[payload])
+
+        has_assumed_period = any(
+            source == "assumed"
+            for source, valid in zip(period_sources, valid_period_columns)
+            if valid
+        )
+        has_missing_period = any(
+            not valid for valid in valid_period_columns
+        )
+        if concentration_mode == "absolute":
+            units = "particles/cm³"
+            if has_assumed_period:
+                units += " (assumed period)"
+            if has_missing_period:
+                units += " (valid-period columns)"
+            mode_label = "absolute {}".format(units)
+        else:
+            units = "raw counts/(mL/s)"
+            mode_label = "relative proxy {}".format(units)
+        self._opc_mode_text[payload].set_text(
+            "{} dN/dlog10(Dp): {}".format(payload.upper(), mode_label)
+        )
+        self._opc_colorbar[payload].set_label(
+            "dN/dlog10(Dp)\n{}".format(units),
+            fontsize=8,
+            color=self.palette["text_muted"],
+        )
 
         ax.set_yscale("log")
         ax.set_ylim(OPC_N3_BIN_EDGES_UM[0], OPC_N3_BIN_EDGES_UM[-1])
@@ -718,6 +848,14 @@ class QuickView:
 
 def main():
     args = parse_args()
+    if (
+        args.opc_sampling_period_s is not None
+        and (
+            not math.isfinite(args.opc_sampling_period_s)
+            or args.opc_sampling_period_s <= 0
+        )
+    ):
+        raise SystemExit("--opc-sampling-period-s must be positive")
     qv = QuickView(
         log_file=args.log_file,
         max_points=args.max_points,
@@ -725,6 +863,7 @@ def main():
         theme=args.theme,
         qnh=args.qnh,
         auto_qnh=not args.no_auto_qnh,
+        opc_sampling_period_s=args.opc_sampling_period_s,
     )
     try:
         qv.run(interval_ms=args.interval_ms)
