@@ -1,9 +1,12 @@
+import json
+import sys
 import time
 import busio
 import digitalio
 import config
 import led
 import pack
+import supervisor
 from actuators import Pump, Valve
 from flowmeter import FlowMeter
 from gps import Gps
@@ -16,6 +19,8 @@ SHT85_INTERVAL_S=10.0
 PRESSURE_INTERVAL_S=10.0
 FLOW_INTERVAL_S=10.0
 OPC_HISTOGRAM_INTERVAL_S=10.0
+USB_COMMAND_MAX_LENGTH=96
+_usb_input_buffer=""
 
 def _snapshot(payload_id,pump,valve,power,logger):
     data={"payload_id":payload_id,"pump_front_state":pump.front_state(),"pump_back_state":pump.back_state(),"valve_state":valve.state() if valve is not None else None}
@@ -73,33 +78,116 @@ def _update_rssi(data,rssi,logger):
         logger.info("LoRa uplink RSSI: {} dBm".format(data["uplink_rssi"]))
     except Exception as e: logger.warning("LoRa uplink RSSI read failed: {}".format(e))
 
-def _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,status_led):
+def _command_parts(msg):
+    if isinstance(msg, bytes):
+        msg = msg.decode()
+    return msg.replace("\x00", "").strip().lower().split()
+
+
+def _apply_command(msg, data, pump, valve, power, safety, payload_id, logger):
+    parts = _command_parts(msg)
+    if not parts:
+        raise ValueError("empty command")
+    logger.info("Command received: " + " ".join(parts))
+    command, args = parts[0], parts[1:]
+    if command == "pump":
+        if len(args) != 2:
+            raise ValueError("pump requires: pump <front|back|both> <on|off>")
+        if args[0] not in ("front", "back", "both"):
+            raise ValueError("pump location: front, back, or both")
+        if args[1] not in ("on", "off"):
+            raise ValueError("pump state: on or off")
+        if not pump.supports(args[0]):
+            raise ValueError("pump {} is not installed".format(args[0]))
+    elif command == "valve":
+        if valve is None:
+            raise ValueError("valve is not installed")
+        if len(args) != 1:
+            raise ValueError("valve requires: valve <on|off>")
+        if args[0] not in ("on", "off"):
+            raise ValueError("valve state: on or off")
+    elif command != "data":
+        raise ValueError("unknown command: " + command)
+    on = (
+        (command == "pump" and args[1] == "on")
+        or (command == "valve" and args[0] == "on")
+    )
+    if safety.locked and on:
+        raise ValueError("safety interlock active")
+    if command == "pump":
+        pump.set_state(args[0], args[1])
+    elif command == "valve":
+        valve.set_state(args[0])
+    data.update(_snapshot(payload_id, pump, valve, power, logger))
+    return parts
+
+
+def _handle_command(msg, data, pump, valve, power, safety, lora, payload_id, logger, status_led):
     try:
-        parts=msg.decode().strip().lower().split()
-        if not parts: return
-        logger.info("Command received: "+" ".join(parts))
-        command,args=parts[0],parts[1:]
-        if command=="pump":
-            if len(args)!=2: raise ValueError("pump requires: pump <front|back|both> <on|off>")
-            if args[0] not in ("front","back","both"): raise ValueError("pump location: front, back, or both")
-            if args[1] not in ("on","off"): raise ValueError("pump state: on or off")
-            if not pump.supports(args[0]): raise ValueError("pump {} is not installed".format(args[0]))
-        elif command=="valve":
-            if valve is None: raise ValueError("valve is not installed")
-            if len(args)!=1: raise ValueError("valve requires: valve <on|off>")
-            if args[0] not in ("on","off"): raise ValueError("valve state: on or off")
-        elif command!="data": raise ValueError("unknown command: "+command)
-        on=(command=="pump" and args[1]=="on") or (command=="valve" and args[0]=="on")
-        if safety.locked and on: raise ValueError("safety interlock active")
-        if command=="pump":
-            pump.set_state(args[0],args[1])
-        elif command=="valve":
-            valve.set_state(args[0])
-        data.update(_snapshot(payload_id,pump,valve,power,logger)); _send(lora,data,pack.MSG_COMMAND_ACK,status_led); logger.info("cmd_ack: "+" ".join(parts))
+        parts = _apply_command(
+            msg, data, pump, valve, power, safety, payload_id, logger
+        )
+        _send(lora, data, pack.MSG_COMMAND_ACK, status_led)
+        logger.info("cmd_ack: " + " ".join(parts))
     except Exception as e:
-        logger.error("Command error: {}".format(e)); data.update(_snapshot(payload_id,pump,valve,power,logger))
-        try: _send(lora,data,pack.MSG_COMMAND_ERROR,status_led)
-        except Exception as x: logger.error("cmd_err send failed: {}".format(x))
+        logger.error("Command error: {}".format(e))
+        data.update(_snapshot(payload_id, pump, valve, power, logger))
+        try:
+            _send(lora, data, pack.MSG_COMMAND_ERROR, status_led)
+        except Exception as x:
+            logger.error("cmd_err send failed: {}".format(x))
+
+
+def _handle_usb_command(msg, data, pump, valve, power, safety, payload_id, logger):
+    command = " ".join(_command_parts(msg))
+    response = {
+        "transport": "usb",
+        "payload_id": payload_id,
+        "command": command,
+    }
+    try:
+        parts = _apply_command(
+            msg, data, pump, valve, power, safety, payload_id, logger
+        )
+        response["command"] = " ".join(parts)
+        response["msg_type"] = pack.MSG_COMMAND_ACK
+        logger.info("usb_cmd_ack: " + response["command"])
+    except Exception as e:
+        logger.error("USB command error: {}".format(e))
+        data.update(_snapshot(payload_id, pump, valve, power, logger))
+        response["msg_type"] = pack.MSG_COMMAND_ERROR
+        response["error"] = str(e)
+    response.update(data)
+    print(json.dumps(response, separators=(",", ":")))
+
+
+def _read_usb_command():
+    global _usb_input_buffer
+    try:
+        available = int(supervisor.runtime.serial_bytes_available)
+        if available <= 0:
+            return None
+    except Exception:
+        return None
+    for _ in range(min(available, USB_COMMAND_MAX_LENGTH)):
+        char = sys.stdin.read(1)
+        if not char:
+            break
+        if isinstance(char, bytes):
+            char = char.decode("utf-8", "ignore")
+        if char == "\x03":
+            _usb_input_buffer = ""
+            continue
+        if char in ("\r", "\n"):
+            command = _usb_input_buffer.strip()
+            _usb_input_buffer = ""
+            if command:
+                return command
+            continue
+        _usb_input_buffer += char
+        if len(_usb_input_buffer) > USB_COMMAND_MAX_LENGTH:
+            _usb_input_buffer = ""
+    return None
 
 def main_loop(lora,payload_id,logger,spi=None,shared_spi=None,pump_locations=("front","back"),has_valve=True,has_opc=True):
     pump=Pump(logger,locations=pump_locations)
@@ -143,6 +231,19 @@ def main_loop(lora,payload_id,logger,spi=None,shared_spi=None,pump_locations=("f
             if gps is not None:
                 sync_event=gps.update()
                 if sync_event is not None: logger.data(sync_event)
+            usb_command = _read_usb_command()
+            if usb_command is not None:
+                status_led.rx()
+                _handle_usb_command(
+                    usb_command,
+                    data,
+                    pump,
+                    valve,
+                    power,
+                    safety,
+                    payload_id,
+                    logger,
+                )
             msg,uplink_rssi=lora.receive_with_rssi(timeout=0.2)
             if msg is not None: status_led.rx(); _update_rssi(data,uplink_rssi,logger); _handle_command(msg,data,pump,valve,power,safety,lora,payload_id,logger,status_led)
             now=time.monotonic(); sampled=False

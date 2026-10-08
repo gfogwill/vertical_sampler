@@ -127,6 +127,23 @@ python host/cli.py data carla
 python host/cli.py pump carla front on
 ```
 
+For bench testing, the Alma or Beni payload can also accept actuator commands
+directly over its own USB connection. Deploy the updated payload firmware first,
+then run the USB helper from the laptop:
+
+```bash
+python host/usb_payload.py --port /dev/ttyACM0 pump front on
+python host/usb_payload.py --port /dev/ttyACM0 data
+python host/usb_payload.py --port /dev/ttyACM0 pump front off
+```
+
+The `--port` option can be omitted when exactly one Pico serial device is
+connected. The helper waits for a JSON acknowledgement and exits; the pump
+state is not tied to the helper process or USB connection. Alma/Beni must
+remain separately powered after the laptop is disconnected, and the normal
+battery/temperature safety interlock still applies. The direct USB path
+accepts `pump front|back|both on|off`, `valve on|off`, and `data`.
+
 Scheduled commands can be sent from a text file using UTC ISO-8601
 timestamps. The command after each timestamp uses the same syntax as the
 one-shot CLI commands:

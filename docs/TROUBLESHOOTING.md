@@ -141,6 +141,24 @@ The host now reports which stage failed:
 The ground terminal also prints `TX command -> <payload>: <command>` after a
 successful radio transmission.
 
+## Alma stops receiving LoRa commands after USB-control update
+
+**Cause:** The USB command reader must not call a blocking `readline()` from
+the payload main loop when only part of a USB-console line is available. A
+partial Thonny/USB-console input can otherwise prevent the loop from reaching
+the LoRa receive call.
+
+**Fix:** Deploy the current `firmware/common/payload.py`, which buffers USB
+input one character at a time and keeps incomplete input non-blocking:
+```bash
+make update-alma
+```
+
+After reboot, wait until the Alma console prints `Payload ready`. If LoRa
+commands still do not work, capture the console lines beginning with
+`LoRa loop error`, `OPC-N3 unavailable`, or `Payload ready`; a command that
+reaches Alma should produce `Command received: ...`.
+
 ---
 
 ## `cp: error writing ... No space left on device` after flashing UF2
