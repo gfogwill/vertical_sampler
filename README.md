@@ -169,9 +169,17 @@ immediately.
 Entries that are already past when the scheduler starts are skipped by
 default. Use `--run-past-due` to execute them immediately, or
 `--dry-run` to validate and print the schedule without sending commands.
-Actuator commands retain the normal one-shot delivery and acknowledgement
-behavior; a missing acknowledgement is reported as a failure and is never
-silently retried.
+For scheduled actuator commands, the host by default waits 5 seconds after
+each send, requests fresh payload telemetry, and checks the requested pump or
+valve state. If the state is not confirmed, the command is sent again, up to
+three total attempts. A command that was applied but whose acknowledgement was
+lost is not resent when the later state check confirms the requested state.
+
+The standalone scheduler accepts `--verify-delay SECONDS` and
+`--max-attempts COUNT`. Monitor schedules use the corresponding
+`--schedule-verify-delay` and `--schedule-max-attempts` options. These options
+apply only to pump and valve commands; `data` entries retain their existing
+telemetry retry behavior.
 
 `host/quickview.py` is available for local data inspection and visualization.
 It displays separate Alma and Beni OPC-N3 heatmaps using the standard

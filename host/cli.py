@@ -47,6 +47,9 @@ MAX_RETRIES = int(PAYLOAD_CYCLE_S / RETRY_INTERVAL_S) + 1
 # An actuator command is sent once because a missing ACK does not tell us
 # whether the payload applied the command.  This covers ground-side LoRa wait.
 ACTUATOR_RESPONSE_TIMEOUT_S = 25
+SCHEDULE_VERIFY_DELAY_S = 5
+SCHEDULE_VERIFY_TIMEOUT_S = 6
+SCHEDULE_MAX_ATTEMPTS = 3
 
 # Wire format constants (must match payload/pack.py)
 _MSG_TYPE_LEN = 12  # field is 12s in struct format
@@ -522,12 +525,21 @@ def _known_binary_state(data, key):
     return value if value in (0, 1) else None
 
 
-def _send_command_on_serial(ser, args, display=True, response_handler=None):
+def _send_command_on_serial(
+    ser,
+    args,
+    display=True,
+    response_handler=None,
+    max_attempts=None,
+    response_timeout_s=None,
+):
     _validate_command_capability(args)
     cmd = _build_cmd(args)
     is_data = (args.subcommand == "data")
-    max_attempts = MAX_RETRIES if is_data else 1
-    response_timeout_s = RETRY_INTERVAL_S if is_data else ACTUATOR_RESPONSE_TIMEOUT_S
+    if max_attempts is None:
+        max_attempts = MAX_RETRIES if is_data else 1
+    if response_timeout_s is None:
+        response_timeout_s = RETRY_INTERVAL_S if is_data else ACTUATOR_RESPONSE_TIMEOUT_S
     _drain_serial(ser, timeout_s=0.5)
     for attempt in range(1, max_attempts + 1):
         if display:
@@ -572,10 +584,137 @@ def _send_command_on_serial(ser, args, display=True, response_handler=None):
     return False
 
 
+def _scheduled_state_fields(args):
+    if args.subcommand == "pump":
+        return {
+            "front": ("pump_front_state",),
+            "back": ("pump_back_state",),
+            "both": ("pump_front_state", "pump_back_state"),
+        }[args.pump_location]
+    if args.subcommand == "valve":
+        return ("valve_state",)
+    return ()
+
+
+def _scheduled_state_matches(args, data):
+    fields = _scheduled_state_fields(args)
+    if not fields:
+        return True
+    if data is None:
+        return False
+    expected = int(args.state == State.ON)
+    return all(_known_binary_state(data, field) == expected for field in fields)
+
+
+def _verify_scheduled_state(
+    ser,
+    args,
+    response_handler=None,
+    response_timeout_s=SCHEDULE_VERIFY_TIMEOUT_S,
+):
+    """Read fresh telemetry and check the requested actuator state."""
+    verification = {}
+    data_args = argparse.Namespace(
+        subcommand="data",
+        payload=args.payload,
+    )
+
+    def capture(data):
+        verification["data"] = data
+        if response_handler is not None:
+            response_handler(data)
+
+    received = _send_command_on_serial(
+        ser,
+        data_args,
+        display=False,
+        response_handler=capture,
+        max_attempts=1,
+        response_timeout_s=response_timeout_s,
+    )
+    return received and _scheduled_state_matches(args, verification.get("data"))
+
+
+def _send_scheduled_on_serial(
+    ser,
+    args,
+    display=True,
+    response_handler=None,
+    sleep_fn=time.sleep,
+    verify_delay_s=SCHEDULE_VERIFY_DELAY_S,
+    max_attempts=SCHEDULE_MAX_ATTEMPTS,
+):
+    """Send a scheduled command and verify actuator state before retrying."""
+    if args.subcommand == "data":
+        return _send_command_on_serial(
+            ser,
+            args,
+            display=display,
+            response_handler=response_handler,
+        )
+    if verify_delay_s < 0:
+        raise ValueError("scheduled verification delay must not be negative")
+    if max_attempts < 1:
+        raise ValueError("scheduled max attempts must be at least 1")
+
+    for attempt in range(1, max_attempts + 1):
+        _send_command_on_serial(
+            ser,
+            args,
+            display=display,
+            response_handler=response_handler,
+        )
+        if display:
+            print(
+                "Waiting {:.1f}s before verifying {} (attempt {}/{})...".format(
+                    verify_delay_s,
+                    _scheduled_command_text(args),
+                    attempt,
+                    max_attempts,
+                )
+            )
+        sleep_fn(verify_delay_s)
+        verified = _verify_scheduled_state(
+            ser,
+            args,
+            response_handler=response_handler,
+        )
+        if verified:
+            if display:
+                print("Scheduled command state verified.")
+            return True
+        if attempt < max_attempts and display:
+            print(
+                "Scheduled command state not confirmed; retrying "
+                "(attempt {}/{}).".format(attempt + 1, max_attempts)
+            )
+        elif display:
+            print(
+                "ERROR: scheduled command state not confirmed after "
+                "{} attempts.".format(max_attempts)
+            )
+    return False
+
+
 def relay_cmd(args):
     with find_serial() as ser:
         time.sleep(0.2)
         return _send_command_on_serial(ser, args)
+
+
+def scheduled_relay_cmd(
+    args,
+    verify_delay_s=SCHEDULE_VERIFY_DELAY_S,
+    max_attempts=SCHEDULE_MAX_ATTEMPTS,
+):
+    with find_serial() as ser:
+        time.sleep(0.2)
+        return _send_scheduled_on_serial(
+            ser,
+            args,
+            verify_delay_s=verify_delay_s,
+            max_attempts=max_attempts,
+        )
 
 
 def run_schedule(
@@ -586,12 +725,18 @@ def run_schedule(
     sleep_fn=time.sleep,
     command_runner=None,
     stop_event=None,
+    verify_delay_s=SCHEDULE_VERIFY_DELAY_S,
+    max_attempts=SCHEDULE_MAX_ATTEMPTS,
 ):
     """Execute scheduled commands once in timestamp order."""
     if now_fn is None:
         now_fn = lambda: datetime.datetime.now(tz=_UTC)
     if command_runner is None:
-        command_runner = relay_cmd
+        command_runner = lambda args: scheduled_relay_cmd(
+            args,
+            verify_delay_s=verify_delay_s,
+            max_attempts=max_attempts,
+        )
 
     if dry_run:
         for entry in entries:
@@ -685,11 +830,20 @@ _CMD_QUIT = "quit"
 
 
 class PollWorker(threading.Thread):
-    def __init__(self, payloads, qnh_provider, log_file):
+    def __init__(
+        self,
+        payloads,
+        qnh_provider,
+        log_file,
+        schedule_verify_delay_s=SCHEDULE_VERIFY_DELAY_S,
+        schedule_max_attempts=SCHEDULE_MAX_ATTEMPTS,
+    ):
         super().__init__(daemon=True)
         self.payloads = payloads
         self.qnh_provider = qnh_provider
         self.log_file = log_file
+        self.schedule_verify_delay_s = schedule_verify_delay_s
+        self.schedule_max_attempts = schedule_max_attempts
         self.cmd_q = queue.Queue()
         self.result_q = queue.Queue()
 
@@ -757,11 +911,13 @@ class PollWorker(threading.Thread):
             self._enrich(d, args.payload)
             self._log(d)
 
-        return _send_command_on_serial(
+        return _send_scheduled_on_serial(
             ser,
             args,
             display=False,
             response_handler=handle_response,
+            verify_delay_s=self.schedule_verify_delay_s,
+            max_attempts=self.schedule_max_attempts,
         )
 
     def _try_parse_heartbeat(self, ser):
@@ -913,13 +1069,21 @@ def _run_monitor(
     auto_qnh=True,
     schedule_entries=None,
     schedule_run_past_due=False,
+    schedule_verify_delay_s=SCHEDULE_VERIFY_DELAY_S,
+    schedule_max_attempts=SCHEDULE_MAX_ATTEMPTS,
 ):
     import curses
 
     fallback_qnh = qnh if qnh is not None else DEFAULT_QNH_HPA
     qnh_provider = QnhProvider(fallback_qnh=fallback_qnh, enabled=auto_qnh)
     qnh_provider.start()
-    worker = PollWorker(payloads, qnh_provider, log_file)
+    worker = PollWorker(
+        payloads,
+        qnh_provider,
+        log_file,
+        schedule_verify_delay_s=schedule_verify_delay_s,
+        schedule_max_attempts=schedule_max_attempts,
+    )
     worker.start()
 
     state = {p: {} for p in payloads}
@@ -1159,6 +1323,20 @@ def _run_monitor(
     qnh_provider.stop()
 
 
+def _nonnegative_float(value):
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must not be negative")
+    return parsed
+
+
+def _positive_int(value):
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Vertical Sampler ground control CLI")
     subparsers = parser.add_subparsers(title="subcommands", dest="subcommand", required=True)
@@ -1209,6 +1387,22 @@ def parse_args():
         action="store_true",
         help="Execute monitor schedule entries that are past due",
     )
+    mon.add_argument(
+        "--schedule-verify-delay",
+        type=_nonnegative_float,
+        default=SCHEDULE_VERIFY_DELAY_S,
+        metavar="SECONDS",
+        help="Wait this long before checking a scheduled actuator state "
+             "(default: %(default)s)",
+    )
+    mon.add_argument(
+        "--schedule-max-attempts",
+        type=_positive_int,
+        default=SCHEDULE_MAX_ATTEMPTS,
+        metavar="COUNT",
+        help="Maximum sends for each scheduled actuator command "
+             "(default: %(default)s)",
+    )
 
     schedule = subparsers.add_parser(
         "schedule",
@@ -1230,6 +1424,22 @@ def parse_args():
         action="store_true",
         help="Validate and print the schedule without sending commands",
     )
+    schedule.add_argument(
+        "--verify-delay",
+        type=_nonnegative_float,
+        default=SCHEDULE_VERIFY_DELAY_S,
+        metavar="SECONDS",
+        help="Wait this long before checking a scheduled actuator state "
+             "(default: %(default)s)",
+    )
+    schedule.add_argument(
+        "--max-attempts",
+        type=_positive_int,
+        default=SCHEDULE_MAX_ATTEMPTS,
+        metavar="COUNT",
+        help="Maximum sends for each scheduled actuator command "
+             "(default: %(default)s)",
+    )
 
     return parser.parse_args()
 
@@ -1250,6 +1460,8 @@ if __name__ == "__main__":
             auto_qnh=not args.no_auto_qnh,
             schedule_entries=schedule_entries,
             schedule_run_past_due=args.schedule_run_past_due,
+            schedule_verify_delay_s=args.schedule_verify_delay,
+            schedule_max_attempts=args.schedule_max_attempts,
         )
     elif args.subcommand == "schedule":
         try:
@@ -1260,6 +1472,8 @@ if __name__ == "__main__":
                 schedule_entries,
                 run_past_due=args.run_past_due,
                 dry_run=args.dry_run,
+                verify_delay_s=args.verify_delay,
+                max_attempts=args.max_attempts,
             )
         except ValueError as exc:
             raise SystemExit("ERROR: {}".format(exc))

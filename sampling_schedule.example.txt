@@ -1,0 +1,38 @@
+# Example command schedule for the Pallas vertical sampler.
+#
+# Edit the dates and times before use. Every timestamp must include a
+# timezone; +03:00 is local summer time in Finland and Z means UTC.
+#
+# The commands use the same syntax as:
+#   python host/cli.py pump ...
+#   python host/cli.py valve ...
+#   python host/cli.py data ...
+#
+# Alma and Beni support front/back pumps and valves. Carla supports only the
+# front pump, so commands for Carla's back pump or valve are invalid.
+#
+# Scheduled pump and valve commands are verified after 5 seconds. If the
+# requested state is not reported, the command is retried up to three total
+# attempts. Override these defaults with --verify-delay and --max-attempts.
+
+# Initial telemetry snapshots.
+2026-09-27T09:00:00+03:00 data alma
+2026-09-27T09:00:00+03:00 data beni
+2026-09-27T09:00:00+03:00 data carla
+
+# Start front-pump sampling.
+2026-09-27T09:05:00+03:00 pump alma front on
+2026-09-27T09:05:00+03:00 pump beni front on
+
+# Open the Alma and Beni electro-valves.
+2026-09-27T09:10:00+03:00 valve alma on
+2026-09-27T09:10:00+03:00 valve beni on
+
+# Stop the sampling interval.
+2026-09-27T12:00:00+03:00 valve alma off
+2026-09-27T12:00:00+03:00 valve beni off
+2026-09-27T12:05:00+03:00 pump alma front off
+2026-09-27T12:05:00+03:00 pump beni front off
+
+# A UTC timestamp is also valid; this is the same instant as 15:00 local time.
+2026-09-27T12:00:00Z data alma
