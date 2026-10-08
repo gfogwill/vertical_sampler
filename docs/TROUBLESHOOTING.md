@@ -39,6 +39,33 @@ supervisor.runtime.autoreload = False
 
 ---
 
+## OPC-N3 initialization reports response `0x03` for command `0x03`
+
+**Cause:** The OPC-N3 power-state command is timing-sensitive. It needs at
+least 2 seconds after power-up, at least 10 ms between SPI transactions, and
+more than 600 ms after a fan or laser power command before another command.
+An echoed command byte can also indicate incorrect SPI wiring or chip-select
+connection.
+
+The firmware now waits 5 seconds at startup and applies the required gaps
+between power-state commands and verification reads.
+
+If the warning persists, check the replacement-board wiring against the PCB
+pin map:
+
+| OPC signal | Pico pin |
+|---|---:|
+| SCK | GP10 |
+| MOSI | GP11 |
+| MISO | GP12 |
+| CS | GP17 |
+
+Also verify a common ground and the OPC supply voltage. Do not repeatedly
+restart the OPC immediately after an unexpected response; its SPI buffer
+needs more than 2 seconds to recover.
+
+---
+
 ## GPS not acquiring fix
 
 **Symptom:** Logger shows `Waiting for GPS fix...` repeatedly.

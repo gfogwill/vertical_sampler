@@ -25,6 +25,9 @@ import config
 
 OPC_READY = 0xF3
 OPC_BUSY = 0x31
+OPC_TRANSACTION_GAP_S = 0.02
+OPC_POWER_SETTLE_S = 0.75
+OPC_ERROR_RECOVERY_S = 2.1
 
 CMD_WRITE_POWER_STATE = 0x03
 CMD_READ_POWER_STATE = 0x13
@@ -223,10 +226,15 @@ class OPCN3:
 
         while response != OPC_READY:
             if response != OPC_BUSY:
-                time.sleep(5)
+                detail = ""
+                if response == command:
+                    detail = (
+                        "; command was echoed, check OPC startup timing and "
+                        "SPI MISO/MOSI/CS wiring"
+                    )
                 raise OPCError(
-                    "Unexpected OPC response 0x{:02X} for command 0x{:02X}".format(
-                        response, command
+                    "Unexpected OPC response 0x{:02X} for command 0x{:02X}{}".format(
+                        response, command, detail
                     )
                 )
 
@@ -251,11 +259,17 @@ class OPCN3:
         self._before_opc()
         result = bytearray(size)
 
-        with self.device as spi:
-            self._send_command_and_wait(spi, command)
+        try:
+            with self.device as spi:
+                self._send_command_and_wait(spi, command)
 
-            for index in range(size):
-                result[index] = self._send_command(spi, command)
+                for index in range(size):
+                    result[index] = self._send_command(spi, command)
+        except OPCError:
+            time.sleep(OPC_ERROR_RECOVERY_S)
+            raise
+
+        time.sleep(OPC_TRANSACTION_GAP_S)
 
         return result
 
@@ -266,11 +280,17 @@ class OPCN3:
         CS remains active throughout the full operation.
         """
         self._before_opc()
-        with self.device as spi:
-            self._send_command_and_wait(spi, command)
+        try:
+            with self.device as spi:
+                self._send_command_and_wait(spi, command)
 
-            for byte in data:
-                self._send_command(spi, byte)
+                for byte in data:
+                    self._send_command(spi, byte)
+        except OPCError:
+            time.sleep(OPC_ERROR_RECOVERY_S)
+            raise
+
+        time.sleep(OPC_TRANSACTION_GAP_S)
 
     @staticmethod
     def _checksum(raw):
@@ -324,10 +344,15 @@ class OPCN3:
             self._before_opc()
             with self.device as spi:
                 self._send_command_and_wait(spi, CMD_CHECK_STATUS)
-            return True
+        except OPCError as error:
+            time.sleep(OPC_ERROR_RECOVERY_S)
+            self._log("warning", "OPC ping failed: {}".format(error))
+            return False
         except Exception as error:
             self._log("warning", "OPC ping failed: {}".format(error))
             return False
+        time.sleep(OPC_TRANSACTION_GAP_S)
+        return True
 
     def info(self):
         """Return the 60-byte OPC information string."""
@@ -372,7 +397,7 @@ class OPCN3:
             (POPT_LASER_SWITCH << 1) | 0
         ])
 
-    def on(self, warmup=True, verify_retries=3, verify_delay_s=0.1):
+    def on(self, warmup=True, verify_retries=3, verify_delay_s=0.75):
         """Turn laser and fan on; optionally wait for the configured warmup.
 
         OPC-N3 sometimes drops the power-state command byte if it arrives
@@ -381,11 +406,22 @@ class OPCN3:
         and retry a few times instead of assuming the write succeeded.
         """
         for attempt in range(verify_retries):
-            self.laser_on()
-            self.fan_on()
-            time.sleep(verify_delay_s)
             try:
+                self.laser_on()
+                time.sleep(max(verify_delay_s, OPC_POWER_SETTLE_S))
+                self.fan_on()
+                time.sleep(max(verify_delay_s, OPC_POWER_SETTLE_S))
                 state = self.power_state()
+            except OPCError as error:
+                self._log(
+                    "warning",
+                    "OPC on() attempt {} failed: {}".format(
+                        attempt + 1, error
+                    ),
+                )
+                if attempt + 1 >= verify_retries:
+                    raise
+                continue
             except Exception as error:
                 self._log("warning", "OPC power_state check failed: {}".format(error))
                 continue
@@ -410,13 +446,20 @@ class OPCN3:
     def off(self):
         """Turn laser and fan off."""
         self.laser_off()
+        time.sleep(OPC_POWER_SETTLE_S)
         self.fan_off()
+        time.sleep(OPC_POWER_SETTLE_S)
 
     def reset(self):
         """Request a documented OPC-N3 software reset."""
         self._before_opc()
-        with self.device as spi:
-            self._send_command_and_wait(spi, CMD_RESET)
+        try:
+            with self.device as spi:
+                self._send_command_and_wait(spi, CMD_RESET)
+        except OPCError:
+            time.sleep(OPC_ERROR_RECOVERY_S)
+            raise
+        time.sleep(OPC_TRANSACTION_GAP_S)
 
     def pm(self):
         """Return PM values as a compact dictionary."""
