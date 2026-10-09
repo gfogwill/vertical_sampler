@@ -279,6 +279,7 @@ Each payload sample is logged as JSONL when an SD card is available and sent ove
 | `pressure_sensor_temperature` | float | Temperature, °C |
 | `battery_voltage` | float | Calibrated 6S battery voltage |
 | `cpu_temperature` | float | Pico internal temperature, °C |
+| `sd_card_available` | int/null | 1 when the payload mounted the SD card successfully; 0 when mounting was unavailable; older packets report unavailable |
 | `flow` | float | Standard L/min |
 | `uplink_rssi` | int/null | Last ground-to-payload command RSSI measured by the payload, dBm |
 | `downlink_rssi` | int/null | Current payload-to-ground packet RSSI measured by the ground station, dBm |
@@ -307,7 +308,9 @@ plotted with `--opc-sampling-period-s <seconds>` only when that period is known.
 
 The current binary telemetry format is shared by all payloads. The ground
 station also accepts the immediately preceding packet format and legacy
-pre-OPC packets; those formats decode `opc_sampling_period_s` as unavailable.
+pre-OPC packets; those formats decode `opc_sampling_period_s` and
+`sd_card_available` as unavailable. In `cli.py monitor`, the System section
+shows this field as `YES` or `NO`.
 Carla sends fill values for the unavailable back pump, electro-valve and OPC-N3
 fields.
 Commands targeting those unavailable devices are rejected by both the host
@@ -325,6 +328,11 @@ The SD-card handler writes:
 | `/sd/<payload_id>_NNN.jsonl` | One JSON object per sample cycle |
 
 If the SD card is unavailable or fails while operating, the payload continues running and transmitting telemetry over LoRa. Logging degrades to the serial console instead of stopping the mission.
+
+The `sd_card_available` telemetry field reports whether the card mounted
+successfully and was available to the logger. It is not a hot-plug sensor:
+removing or inserting a card after boot is not reported until the payload is
+restarted and mounts the card again.
 
 ## Safety Features
 

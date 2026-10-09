@@ -81,6 +81,7 @@ FIELDS = [
     ("opc_sampling_period_s",       "Sampling period",   "s",     "OPC"),
     ("opc_laser_status",            "Laser status",      "",      "OPC"),
     ("battery_voltage",             "Battery",           "V",     "System"),
+    ("sd_card_available",           "SD card",           "",      "System"),
     ("uplink_rssi",                 "RSSI ground->payload", "dBm", "System"),
     ("downlink_rssi",               "RSSI payload->ground", "dBm", "System"),
     ("cpu_temperature",             "CPU temp",          "\u00b0C",   "System"),
@@ -154,6 +155,8 @@ def _fmt_value(key, val):
             return str(val), False
     if key in ("pump_front_state", "pump_back_state"):
         return ("ON" if val else "OFF"), False
+    if key == "sd_card_available":
+        return ("YES" if val else "NO"), False
     if key == "valve_state":
         return str(val), False
     if isinstance(val, float):

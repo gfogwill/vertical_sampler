@@ -23,7 +23,7 @@ USB_COMMAND_MAX_LENGTH=96
 _usb_input_buffer=""
 
 def _snapshot(payload_id,pump,valve,power,logger):
-    data={"payload_id":payload_id,"pump_front_state":pump.front_state(),"pump_back_state":pump.back_state(),"valve_state":valve.state() if valve is not None else None}
+    data={"payload_id":payload_id,"pump_front_state":pump.front_state(),"pump_back_state":pump.back_state(),"valve_state":valve.state() if valve is not None else None,"sd_card_available":int(logger.sd_card.available)}
     try: data["battery_voltage"]=power.battery_voltage()
     except Exception as e: data["battery_voltage"]=None; logger.warning("Battery read failed: {}".format(e))
     try: data["cpu_temperature"]=power.cpu_temperature()
@@ -79,8 +79,8 @@ def _update_rssi(data,rssi,logger):
     except Exception as e: logger.warning("LoRa uplink RSSI read failed: {}".format(e))
 
 def _command_parts(msg):
-    if isinstance(msg, bytes):
-        msg = msg.decode()
+    if isinstance(msg, (bytes, bytearray)):
+        msg = bytes(msg).decode()
     return msg.replace("\x00", "").strip().lower().split()
 
 

@@ -104,6 +104,11 @@ print(os.listdir("/sd"))
 ```
 If this works but boot does not, the problem is in `main.py` initialization order.
 
+The `cli.py monitor` System section reports the same boot-time mount result as
+`SD card: YES` or `SD card: NO`. Older payload packets show `N/A`. This is a
+mount/availability status, not a physical hot-plug detector; restart the
+payload after inserting or removing a card.
+
 ---
 
 ## `cli.py` can't find the serial port
@@ -137,6 +142,10 @@ The host now reports which stage failed:
   not reply. Check the payload address, receiver wiring, antenna and power.
 - `Command received: ...` in the payload terminal confirms that the packet
   reached the payload command handler.
+- If the payload logs `Command error: 'bytearray' object has no attribute
+  'replace'`, deploy the current `firmware/common/payload.py`. LoRa receive
+  returns a `bytearray` on CircuitPython, and the command parser now accepts
+  both byte strings and byte arrays.
 
 The ground terminal also prints `TX command -> <payload>: <command>` after a
 successful radio transmission.

@@ -29,13 +29,17 @@ KEYS = [
     ("opc_sampling_period_s", "f"),
     ("opc_laser_status", "i"),
     ("payload_id", "10s"),
+    ("sd_card_available", "i"),
 ]
 
-# Current wire format before opc_sampling_period_s was added. Keep accepting
+# Previous current format before sd_card_available was added.
+_KEYS_PRE_SD = KEYS[:-1]
+
+# Earlier wire format before opc_sampling_period_s was added. Keep accepting
 # this packet size while payloads and the ground station are updated together.
 _KEYS_V1 = [
     (key, fmt)
-    for key, fmt in KEYS
+    for key, fmt in _KEYS_PRE_SD
     if key != "opc_sampling_period_s"
 ]
 
@@ -61,11 +65,13 @@ _KEYS_LEGACY = [
 ]
 
 FORMAT = "<" + "".join([t for _, t in KEYS])
+_FORMAT_PRE_SD = "<" + "".join([t for _, t in _KEYS_PRE_SD])
 _FORMAT_V1 = "<" + "".join([t for _, t in _KEYS_V1])
 _FORMAT_LEGACY = "<" + "".join([t for _, t in _KEYS_LEGACY])
 
 # Pre-computed sizes so callers can sanity-check incoming bytes.
 WIRE_SIZE = struct.calcsize(FORMAT)
+WIRE_SIZE_PRE_SD = struct.calcsize(_FORMAT_PRE_SD)
 WIRE_SIZE_V1 = struct.calcsize(_FORMAT_V1)
 LEGACY_SIZE = struct.calcsize(_FORMAT_LEGACY)
 
@@ -122,16 +128,21 @@ def dict2bytes(d: dict) -> bytes:
 def bytes2dict(b) -> dict:
     """Deserialize wire bytes to a dict.
 
-    Accepts the current FORMAT, the immediately preceding FORMAT without
-    opc_sampling_period_s, and the legacy pre-OPC FORMAT. Any other length
-    raises ValueError with a descriptive message so callers can log it
-    instead of swallowing it silently.
+    Accepts the current FORMAT, the previous current FORMAT without
+    sd_card_available, the earlier FORMAT without opc_sampling_period_s,
+    and the legacy pre-OPC FORMAT. Any other length raises ValueError with
+    a descriptive message so callers can log it instead of swallowing it
+    silently.
     """
     n = len(b)
     if n == WIRE_SIZE:
         keys_used = KEYS
         fmt_used = FORMAT
         packet_version = "current"
+    elif n == WIRE_SIZE_PRE_SD:
+        keys_used = _KEYS_PRE_SD
+        fmt_used = _FORMAT_PRE_SD
+        packet_version = "pre_sd"
     elif n == WIRE_SIZE_V1:
         keys_used = _KEYS_V1
         fmt_used = _FORMAT_V1
@@ -142,8 +153,12 @@ def bytes2dict(b) -> dict:
         packet_version = "legacy"
     else:
         raise ValueError(
-            "pack: bad packet length {} (expected {}, {}, or {})".format(
-                n, WIRE_SIZE, WIRE_SIZE_V1, LEGACY_SIZE
+            "pack: bad packet length {} (expected {}, {}, {}, or {})".format(
+                n,
+                WIRE_SIZE,
+                WIRE_SIZE_PRE_SD,
+                WIRE_SIZE_V1,
+                LEGACY_SIZE,
             )
         )
     tup = struct.unpack(fmt_used, b)
@@ -157,11 +172,15 @@ def bytes2dict(b) -> dict:
         else:
             result[k] = v
 
-    if packet_version == "v1":
+    if packet_version == "pre_sd":
+        result["sd_card_available"] = None
+    elif packet_version == "v1":
         result["opc_sampling_period_s"] = None
+        result["sd_card_available"] = None
     elif packet_version == "legacy":
         # Tag as telemetry so downstream code can use msg_type safely
         result["msg_type"] = MSG_TELEMETRY
         result["opc_sampling_period_s"] = None
+        result["sd_card_available"] = None
 
     return result
